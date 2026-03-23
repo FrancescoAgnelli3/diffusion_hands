@@ -1,0 +1,44 @@
+num_joints: 22 # synthetic root + 21 hand joints
+fps: 10
+
+multimodal_threshold: 0.5
+dataset_type: AssemblyDataset
+dataset_name: assembly
+precomputed_folder: "${dataset_precomputed_path}/ASSEMBLY/${task.task_name}/"
+annotations_folder: "${dataset_annotation_path}/ASSEMBLY/${task.task_name}/"
+dtype: float32
+
+# SplineEqNet-compatible preprocessing source.
+assembly_splineeqnet_root: /home/agnelli/projects/4D_hands_working/SplineEqNet
+assembly_data_dir: ""
+assembly_action_filter: ""
+assembly_wrist_indices: [5, 26]
+assembly_time_interp: null
+assembly_window_norm: null
+
+data_loader_train:
+    stride: 5
+    augmentation: 0
+    shuffle: True
+    da_mirroring: 0.0
+    da_rotations: 0.0
+    drop_last: True
+    if_load_mmgt: False
+
+data_loader_train_eval:
+    stride: 5
+    augmentation: 0
+    shuffle: False
+    da_mirroring: 0.0
+    da_rotations: 0.0
+    drop_last: False
+    if_load_mmgt: False
+
+data_loader_valid:
+    stride: 5
+    augmentation: 0
+    shuffle: False
+    da_mirroring: 0.0
+    da_rotations: 0.0
+    drop_last: False
+    if_load_mmgt: False

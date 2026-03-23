@@ -1,0 +1,10 @@
+if_consider_hip: False
+
+# Match SplineEqNet Assembly horizon: input_n=70, output_n=30 with dataset.fps=10.
+history_sec: 7
+prediction_horizon_sec: 3
+
+# Keep coordinates in the same space (no extra rescaling).
+motion_repr_type: "SkeletonCenterPose"
+seq_centering: 0
+task_name: hmp

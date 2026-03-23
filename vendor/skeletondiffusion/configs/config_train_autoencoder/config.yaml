@@ -1,0 +1,25 @@
+
+
+if_resume_training: false
+silent: false
+device: cuda
+load: false
+load_path: ''
+dataset_main_path: ./datasets
+dataset_annotation_path: ${dataset_main_path}/annotations
+dataset_precomputed_path: ${dataset_main_path}/processed
+
+output_log_path: ./output/${task.task_name}/${dataset.dataset_name}/autoencoder/${now:%B%d_%H-%M-%S}
+hydra:
+  run:
+    dir: ${output_log_path}
+  job:
+    chdir: False
+
+defaults:
+  - _self_
+  - task: hmp
+  - dataset: assembly
+  - model: autoencoder
+  - override hydra/job_logging: disabled    
+  # - override hydra/hydra_logging: disabled  

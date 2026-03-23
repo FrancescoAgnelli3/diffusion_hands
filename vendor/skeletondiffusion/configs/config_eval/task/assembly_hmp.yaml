@@ -1,0 +1,4 @@
+history_sec: 7
+prediction_horizon_sec: 3
+task_name: "hmp"
+if_consider_hip: False

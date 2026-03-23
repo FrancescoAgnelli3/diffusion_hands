@@ -1,0 +1,64 @@
+hydra:
+  output_subdir: null  
+  run:  
+    dir: .  
+  job:
+    chdir: False
+
+dataset_main_path: ./datasets
+dataset_annotation_path: ${dataset_main_path}/annotations
+dataset_precomputed_path: ${dataset_main_path}/processed
+checkpoint_path: ''
+defaults:
+  - _self_
+  - task: hmp
+  - method_specs: skeleton_diffusion 
+  - dataset: assembly
+  - override hydra/hydra_logging: disabled  
+  - override hydra/job_logging: disabled  
+
+method_name: ${method_specs.method_name}
+dtype: float32
+if_noisy_obs: False
+noise_level: 0.25
+noise_std: 0.02
+
+stats_mode: deterministic #probabilistic, deterministic
+batch_size:  512 
+metrics_at_cpu: False
+n_gpu: 1
+num_samples: 50 
+if_measure_time: False
+
+seed: 0
+dataset_split: test
+silent: False
+
+obs_length: ${eval:'int(${task.history_sec} * ${dataset.fps})'}
+pred_length:  ${eval:'int(${task.prediction_horizon_sec} * ${dataset.fps})'}
+
+if_store_output: False
+store_output_path: ${eval:"'models/final_predictions_storage/${task.task_name}/${method_specs.method_name}/${dataset.dataset_name}/' if not ${if_long_term_test} else 'models/final_predictions_storage/${task.task_name}_longterm/${method_specs.method_name}/${dataset.dataset_name}/'"} 
+if_store_gt: False 
+store_gt_path: ${eval:"'models/final_predictions_storage/${task.task_name}/GT/${dataset.dataset_name}/' if not ${if_long_term_test} else 'models/final_predictions_storage/${task.task_name}_longterm/GT/${dataset.dataset_name}/'"} 
+
+if_compute_apde: ${eval:"False if ${eval:"'${dataset.dataset_name}' in ['freeman']"} else True"}
+if_long_term_test: False
+long_term_factor: 2.5
+
+if_compute_fid: False
+if_compute_cmd: True
+
+# Assembly evaluation with SplineEqNet-compatible preprocessing/metrics.
+if_use_splineeqnet_assembly_pipeline: False
+assembly_splineeqnet_root: /home/agnelli/projects/4D_hands_working/SplineEqNet
+assembly_data_dir: ""
+assembly_action_filter: ""
+assembly_stride: 5
+assembly_time_interp: null
+assembly_window_norm: null
+assembly_eval_batch_mult: 1
+assembly_split_strategy: validation # validation|test ; default keeps parity with load_best_models.py
+assembly_mpjpe_best_of_k: ${num_samples}
+humanmac_num_candidates: ${num_samples}
+humanmac_multimodal_threshold: 0.5

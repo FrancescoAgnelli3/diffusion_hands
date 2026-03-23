@@ -1,0 +1,22 @@
+if_resume_training: false
+device: cuda
+load: false
+load_path: ''
+dataset_main_path: ./datasets
+dataset_annotation_path: ${dataset_main_path}/annotations
+dataset_precomputed_path: ${dataset_main_path}/processed
+silent: False
+
+dataset_folder_log_path: assembly
+output_log_path: ./output/hmp/${dataset_folder_log_path}/diffusion/${now:%B%d_%H-%M-%S}
+hydra:
+  run:
+    dir: ${output_log_path}
+  job:
+    chdir: False
+
+defaults:
+  - _self_
+  - model: skeleton_diffusion
+  - cov_matrix: adjacency
+  - override hydra/job_logging: disabled  

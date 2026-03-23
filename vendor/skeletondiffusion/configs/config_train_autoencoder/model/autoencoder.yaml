@@ -1,0 +1,57 @@
+batch_size: 512
+batch_size_eval: 512
+if_run_validation: False
+eval_frequency: 50
+save_frequency: 50 # in epochs
+num_epochs: 50
+num_iteration_eval: 10
+num_workers: 4
+seed: 52345
+
+use_lr_scheduler: True
+lr_scheduler_kwargs: 
+  lr_scheduler_type: ExponentialLRSchedulerWarmup  
+  warmup_duration: 10
+  update_every: 1
+  min_lr: 1.e-4
+  gamma_decay: 0.98
+
+
+loss_pose_type: l1
+
+
+lr: 0.5e-2
+latent_size: 48
+output_size: 3
+
+
+z_activation: tanh
+num_iter_perepoch: 580
+
+obs_length: ${eval:'int(${task.history_sec} * ${dataset.fps})'}
+prediction_horizon_train: ${model.prediction_horizon}
+prediction_horizon_eval: ${model.prediction_horizon}
+prediction_horizon:  ${eval:'int(${task.prediction_horizon_sec} * ${dataset.fps})'}
+pred_length: ${model.prediction_horizon_eval}
+
+
+
+autoenc_arch:
+  enc_num_layers: 1
+  encoder_hidden_size: 48
+  decoder_hidden_size: 48
+  arch: AutoEncoder 
+  recurrent_arch_enc: StaticGraphGRU
+  recurrent_arch_decoder: StaticGraphGRU
+
+
+
+prediction_horizon_train_min: 10 
+prediction_horizon_train_min_from_epoch: 200
+curriculum_it: 10
+random_prediction_horizon: True
+
+
+
+
+  

@@ -1,0 +1,57 @@
+pretrained_autoencoder_path: '' 
+
+
+lr: 1.e-3 
+diffusion_objective: pred_x0
+weight_decay: 0.
+
+
+if_use_ema: True
+step_start_ema: 100 
+ema_power: ${eval:'2/3'}
+ema_update_every: 10
+ema_min_value: 0.0
+use_lr_scheduler: True
+lr_scheduler_kwargs: 
+  lr_scheduler_type: ExponentialLRSchedulerWarmup
+  warmup_duration: 50
+  update_every: 2
+  min_lr: 1.e-4
+  gamma_decay: 0.98
+
+diffusion_conditioning: True
+num_epochs: 200
+num_workers: 4
+batch_size: 64
+batch_size_eval: 256
+if_run_validation: False
+eval_frequency: 25 # in epochs
+train_pick_best_sample_among_k: 50
+similarity_space: input_space # input_space, latent_space or metric_space
+
+
+diffusion_activation: identity
+num_prob_samples: 50
+diffusion_timesteps: 10
+
+diffusion_type: NonisotropicGaussianDiffusion
+diffusion_loss_type: snr 
+loss_reduction_type: l1
+if_run_as_isotropic: False
+if_sigma_n_scale: True
+diffusion_covariance_type: skeleton-diffusion # anisotropic, isotropic, skeleton-diffusion
+gamma_scheduler: cosine # mono_decrease, cosine
+beta_schedule: cosine
+sigma_n_scale: spectral
+num_iter_perepoch: null
+seed: 63485
+
+diffusion_arch: 
+    arch: Denoiser
+    use_attention: True
+    self_condition: False
+    norm_type: none
+    depth: 4
+    attn_dim_head: 32
+    attn_heads: 8
+    learn_influence: True

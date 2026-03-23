@@ -1,0 +1,41 @@
+dataset: assembly
+data_dir: /mnt/turing-datasets/h2o
+action_filter: pick_up_screwd
+seed: 0
+stride: 5
+time_interp: null
+normalize_data: false
+nz: 128
+t_his: 70
+t_pred: 30
+lambda_v: 1000
+beta: 0.1
+vae_specs:
+  rnn_type: gru
+  x_birnn: false
+  e_birnn: false
+  use_drnn_mlp: true
+vae_lr: 0.001
+batch_size: 64
+num_vae_epoch: 500
+num_vae_epoch_fix: 100
+num_vae_data_sample: 5000
+nk: 10
+dlow_batch_size: 64
+d_scale: 100
+lambda_j: 1
+lambda_kl: 1
+lambda_recon: 2.0
+dlow_lr: 0.0001
+dlow_specs:
+  model_name: NFDiag
+  rnn_type: gru
+  nh_mlp:
+  - 1024
+  - 512
+  x_birnn: false
+num_dlow_epoch: 500
+num_dlow_epoch_fix: 100
+num_dlow_data_sample: 5000
+window_norm: null
+save_model_interval: 500

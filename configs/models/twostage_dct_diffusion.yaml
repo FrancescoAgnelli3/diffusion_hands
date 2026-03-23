@@ -1,0 +1,43 @@
+model: twostage_dct_diffusion
+enabled: true
+train:
+  epochs: 50
+eval: {}
+options: {}
+defaults:
+  model: twostage_dct_diffusion
+  input_n: 70
+  output_n: 30
+  stride: 5
+  batch_size: 512
+  lr: 0.001
+  hidden_size: 128
+  gru_layers: 8
+  gradient_clip: 0
+  bone_loss_weight: 0.0
+  dct_keep_coeffs: 80
+  simlpe_norm_axis: all
+  simlpe_use_norm: true
+  simlpe_use_spatial_fc_only: false
+  simlpe_mix_spatial_temporal: false
+  simlpe_add_last_offset: true
+  twostage_k_low: 80
+  twostage_diffusion_epochs: 500
+  twostage_diffusion_steps: 100
+  twostage_ddim_steps: 50
+  twostage_denoiser_dim: 64
+  twostage_denoiser_depth: 4
+  twostage_denoiser_heads: 4
+  twostage_dropout: 0.0
+  twostage_freeze_coarse: true
+  twostage_cond_use_history: false
+  twostage_cond_use_coarse: true
+  twostage_use_mamp_condition: false
+  twostage_use_mamp_condition_coarse: false
+  twostage_mamp_checkpoint: ""
+  twostage_mamp_config: ""
+  twostage_mamp_repo_root: ""
+  twostage_mamp_mask_ratio: 0.0
+  twostage_mamp_motion_aware_tau: 0.8
+  twostage_mpjpe_weight: 0.0
+  epochs: 50

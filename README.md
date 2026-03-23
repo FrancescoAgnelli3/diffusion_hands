@@ -13,26 +13,20 @@ Unified runner for training and evaluating multiple hand-motion models (twostage
 
 ## Environment Setup
 
-This repo uses a local virtual environment at `.venv`.
+Use `uv` to create and manage the local virtual environment.
+
+Create `.venv` and install dependencies:
+
+```bash
+cd /home/agnelli/projects/diffusion_hands
+uv venv .venv
+uv pip install -r requirements.txt
+```
 
 Activate it:
 
 ```bash
-cd /home/agnelli/projects/diffusion_hands
 source .venv/bin/activate
-```
-
-Install dependencies from `requirements.txt`:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-Note: your current `.venv` does not include `pip` by default. If needed, bootstrap it first:
-
-```bash
-python -m ensurepip --upgrade
-python -m pip install --upgrade pip
 ```
 
 ## Running

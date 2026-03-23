@@ -17,7 +17,7 @@ preprocessing:
 # When `datasets` is set, each dataset is processed sequentially:
 # load data -> train/eval all enabled models -> next dataset.
 # dataset: assembly
-datasets: [assembly, h2o, bighands, fpha]
+datasets: [h2o, bighands, fpha]
 action_filter: "pick_up_screwd"  # if empty, defaults to pick_up_screwd only for assembly
 
 models:

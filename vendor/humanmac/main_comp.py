@@ -69,7 +69,7 @@ if __name__ == '__main__':
     if args.twostage_ddim_steps is not None:
         cfg.ddim_timesteps = int(args.twostage_ddim_steps)
 
-    if cfg.dataset == 'assembly':
+    if cfg.dataset in {'assembly', 'h2o', 'bighands', 'fpha'}:
         split_seed = args.seed if args.split_seed is None else args.split_seed
         train_files, val_files, test_files = split_train_val_test(
             data_dir=cfg.data_dir,
@@ -81,7 +81,7 @@ if __name__ == '__main__':
         cfg.test_subset_files = eval_files
 
         split_manifest = {
-            'dataset': 'assembly',
+            'dataset': cfg.dataset,
             'split_seed': int(split_seed),
             'action_filter': cfg.action_filter or '',
             'data_dir': cfg.data_dir,
@@ -101,7 +101,7 @@ if __name__ == '__main__':
     tb_logger = SummaryWriter(cfg.tb_dir)
     logger = create_logger(os.path.join(cfg.log_dir, 'log.txt'))
     display_exp_setting(logger, cfg)
-    if cfg.dataset == 'assembly':
+    if cfg.dataset in {'assembly', 'h2o', 'bighands', 'fpha'}:
         logger.info(
             "SplineEqNet-compatible split -> "
             f"train={len(cfg.train_subset_files)}, eval={len(cfg.test_subset_files)}, "

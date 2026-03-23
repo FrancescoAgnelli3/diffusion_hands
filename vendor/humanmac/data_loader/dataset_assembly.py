@@ -1,5 +1,7 @@
 import glob
+import importlib.util
 import os
+import sys
 from typing import Optional, Sequence
 
 import numpy as np
@@ -229,54 +231,83 @@ class DatasetAssembly(Dataset):
         t_his=25,
         t_pred=100,
         actions='all',
+        dataset_name: str = 'assembly',
+        splineeqnet_root: str = '/home/agnelli/projects/diffusion_hands/vendor/splineeqnet',
         data_dir=None,
         action_filter='',
         seed=0,
         subset_files: Optional[Sequence[str]] = None,
         time_interp: Optional[int] = None,
         window_norm: Optional[int] = None,
+        stride: int = 5,
     ):
-        self.data_dir = data_dir or "/mnt/turing-datasets/AssemblyHands/assembly101-download-scripts/data_our/"
-        self.action_filter = action_filter or ''
+        self.dataset_name = str(dataset_name).lower()
+        self.splineeqnet_root = splineeqnet_root
+        self.data_dir = data_dir
+        self.action_filter = action_filter
         self.seed = int(seed)
         self.subset_files = list(subset_files) if subset_files is not None else None
         self.time_interp = int(time_interp) if time_interp is not None else None
         self.window_norm = int(window_norm) if window_norm is not None else int(t_his)
+        self.stride = max(1, int(stride))
         super().__init__(mode, t_his, t_pred, actions)
 
     def prepare_data(self):
-        if not os.path.isdir(self.data_dir):
-            raise FileNotFoundError(
-                f"Assembly data directory not found: {self.data_dir}. "
-                "Set cfg.data_dir in cfg/assembly.yml."
-            )
+        if self.splineeqnet_root not in sys.path:
+            sys.path.insert(0, self.splineeqnet_root)
+        spline_cfg_path = os.path.join(self.splineeqnet_root, "config.py")
+        spline_data_path = os.path.join(self.splineeqnet_root, "data.py")
+        cfg_spec = importlib.util.spec_from_file_location("splineeqnet_config", spline_cfg_path)
+        data_spec = importlib.util.spec_from_file_location("splineeqnet_data", spline_data_path)
+        if cfg_spec is None or cfg_spec.loader is None or data_spec is None or data_spec.loader is None:
+            raise RuntimeError(f"Unable to import SplineEqNet modules from '{self.splineeqnet_root}'.")
 
-        if self.subset_files is not None:
-            files = [os.path.abspath(f) for f in self.subset_files if os.path.isfile(f)]
-        else:
-            files = sorted(glob.glob(os.path.join(self.data_dir, "*.npy")))
-            if self.action_filter:
-                files = [f for f in files if self.action_filter in os.path.basename(f)]
-            if self.actions != 'all':
-                act_set = {a.lower() for a in self.actions}
-                files = [f for f in files if any(a in os.path.basename(f).lower() for a in act_set)]
+        cfg_mod = importlib.util.module_from_spec(cfg_spec)
+        data_mod = importlib.util.module_from_spec(data_spec)
+        cfg_spec.loader.exec_module(cfg_mod)
+        prev_config_mod = sys.modules.get("config")
+        sys.modules["config"] = cfg_mod
+        try:
+            data_spec.loader.exec_module(data_mod)
+        finally:
+            if prev_config_mod is None:
+                sys.modules.pop("config", None)
+            else:
+                sys.modules["config"] = prev_config_mod
 
-        if not files:
-            raise RuntimeError(
-                f"No Assembly .npy files found under '{self.data_dir}' with action_filter='{self.action_filter}'."
-            )
-        if self.subset_files is None:
-            if len(files) < 2:
-                raise RuntimeError("At least two Assembly sequence files are required for train/test split.")
-            rng = np.random.RandomState(self.seed)
-            idx = np.arange(len(files))
-            rng.shuffle(idx)
-            files = [files[i] for i in idx]
+        DatasetCfg = cfg_mod.DatasetCfg
+        build_datasets = data_mod.build_datasets
+        get_dataset_metadata = data_mod.get_dataset_metadata
 
-            n_train, _ = _ensure_train_test_split(len(files), test_fraction=0.2)
-            split_files = files[:n_train] if self.mode == 'train' else files[n_train:]
-        else:
-            split_files = files
+        metadata = get_dataset_metadata(self.dataset_name)
+        data_dir = self.data_dir or metadata.get("default_dir", "")
+        action_filter = (
+            metadata.get("default_action_filter", "")
+            if self.action_filter is None
+            else str(self.action_filter)
+        )
+        default_wrist_indices = tuple(int(x) for x in metadata.get("default_wrist_indices", (5, 26)))
+        ds_cfg = DatasetCfg(
+            data_dir=data_dir,
+            action_filter=action_filter,
+            input_n=int(self.t_his),
+            output_n=int(self.t_pred),
+            stride=int(self.stride),
+            time_interp=self.time_interp,
+            window_norm=self.window_norm,
+            batch_size=1,
+            eval_batch_mult=1,
+            seed=int(self.seed),
+            wrist_indices=default_wrist_indices,
+            dataset=self.dataset_name,
+            node_count=int(metadata.get("node_count", 21)),
+            edge_index=tuple(metadata.get("edge_index", ())),
+            adjacency=tuple(metadata.get("adjacency", ())),
+        )
+        train_dataset, val_dataset, test_dataset = build_datasets(ds_cfg)
+        split_ds = {"train": train_dataset, "test": test_dataset, "val": val_dataset}
+        if self.mode not in split_ds:
+            raise ValueError(f"Unknown split '{self.mode}'. Expected one of train/val/test.")
 
         # Hand tree derived from SplineEqNet Assembly links, reindexed to wrist-at-0.
         parents = _parents_from_links(21, ASSEMBLY_SINGLE_HAND_LINKS, root=0)
@@ -290,25 +321,23 @@ class DatasetAssembly(Dataset):
         self.norm_factors = {}
 
         seqs = {}
-        for file_path in split_files:
-            raw = _load_assembly_raw(file_path)
-            hand_pack = _select_active_hand(raw, window_norm=self.window_norm, time_interp=self.time_interp)
-            if hand_pack is None:
-                continue
-            hand, norm_factor = hand_pack
+        selected_ds = split_ds[self.mode]
+        for seq_idx, seq_tensor in enumerate(getattr(selected_ds, "sequences", [])):
+            hand = seq_tensor[..., 4:].detach().cpu().numpy().astype(np.float32)
             if hand.shape[0] < self.t_total:
                 continue
-            seq_name = os.path.splitext(os.path.basename(file_path))[0]
+            seq_name = f"{self.dataset_name}_{self.mode}_{seq_idx:06d}"
             seqs[seq_name] = hand
+            norm_factor = getattr(selected_ds, "norm_factors", [1.0])[seq_idx]
             self.norm_factors[seq_name] = float(norm_factor)
 
         if not seqs:
             raise RuntimeError(
-                "No valid Assembly sequences remained after preprocessing/splitting. "
+                "No valid sequences remained after preprocessing/splitting. "
                 "Check file shapes and t_his/t_pred values."
             )
 
-        subject_name = f"assembly_{self.mode}"
+        subject_name = f"{self.dataset_name}_{self.mode}"
         self.subjects = [subject_name]
         self.data = {subject_name: seqs}
 

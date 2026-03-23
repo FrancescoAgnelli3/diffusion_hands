@@ -1,4 +1,3 @@
-import os
 import sys
 from pathlib import Path
 
@@ -10,7 +9,6 @@ from motion_pred.utils.skeleton import Skeleton
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-from common.preprocessing import select_most_active_hand, split_train_val_test  # type: ignore
 
 
 class DatasetAssembly(Dataset):
@@ -20,30 +18,31 @@ class DatasetAssembly(Dataset):
         t_his=70,
         t_pred=30,
         actions="all",
+        dataset_name="assembly",
         data_dir=None,
         action_filter="",
         stride=5,
         seed=0,
         time_interp=None,
         window_norm=None,
+        splineeqnet_root=None,
         use_vel=False,
         **kwargs,
     ):
+        self.dataset_name = str(dataset_name).lower()
         self.data_dir = data_dir
-        self.action_filter = action_filter or ""
+        self.action_filter = action_filter
         self.stride = max(1, int(stride))
         self.seed = int(seed)
         self.time_interp = time_interp
         self.window_norm = int(window_norm) if window_norm is not None else int(t_his)
+        self.splineeqnet_root = str(splineeqnet_root or (_PROJECT_ROOT / "vendor" / "splineeqnet"))
         self.use_vel = use_vel
         super().__init__(mode, t_his, t_pred, actions)
         if use_vel:
             self.traj_dim += 3
 
     def prepare_data(self):
-        if not self.data_dir:
-            self.data_dir = "/mnt/turing-datasets/AssemblyHands/assembly101-download-scripts/data_our/"
-
         self.subjects_split = {}
         self.subjects = [self.mode]
         self.kept_joints = np.arange(21)
@@ -56,27 +55,46 @@ class DatasetAssembly(Dataset):
         self.process_data()
 
     def process_data(self):
-        train_files, val_files, test_files = split_train_val_test(
-            data_dir=self.data_dir,
-            action_filter=self.action_filter,
-            seed=self.seed,
+        if self.splineeqnet_root not in sys.path:
+            sys.path.insert(0, self.splineeqnet_root)
+        from config import DatasetCfg
+        from data import build_datasets, get_dataset_metadata
+
+        metadata = get_dataset_metadata(self.dataset_name)
+        data_dir = self.data_dir or metadata.get("default_dir", "")
+        action_filter = (
+            metadata.get("default_action_filter", "")
+            if self.action_filter is None
+            else str(self.action_filter)
         )
-        split_files = {"train": train_files, "val": val_files, "test": test_files}
-        if self.mode not in split_files:
+        default_wrist_indices = tuple(int(idx) for idx in metadata.get("default_wrist_indices", (5, 26)))
+        ds_cfg = DatasetCfg(
+            data_dir=data_dir,
+            action_filter=action_filter,
+            input_n=int(self.t_his),
+            output_n=int(self.t_pred),
+            stride=int(self.stride),
+            time_interp=self.time_interp,
+            window_norm=self.window_norm,
+            batch_size=1,
+            eval_batch_mult=1,
+            seed=int(self.seed),
+            wrist_indices=default_wrist_indices,
+            dataset=self.dataset_name,
+            node_count=int(metadata.get("node_count", 21)),
+            edge_index=tuple(metadata.get("edge_index", ())),
+            adjacency=tuple(metadata.get("adjacency", ())),
+        )
+        train_dataset, val_dataset, test_dataset = build_datasets(ds_cfg)
+        split_ds = {"train": train_dataset, "val": val_dataset, "test": test_dataset}
+        if self.mode not in split_ds:
             raise ValueError(f"Unknown Assembly split '{self.mode}'. Expected one of train/val/test.")
 
         sequences = {}
         self.norm_factors = {}
-        for file_path in split_files[self.mode]:
-            selected = select_most_active_hand(
-                file_path,
-                time_interp=self.time_interp,
-                window_norm=self.window_norm,
-            )
-            if selected is None:
-                continue
-
-            seq, norm_factor = selected
+        selected_ds = split_ds[self.mode]
+        for seq_idx, seq_tensor in enumerate(getattr(selected_ds, "sequences", [])):
+            seq = seq_tensor[..., 4:].detach().cpu().numpy().astype(np.float32)
             if seq.shape[0] < self.t_total:
                 continue
 
@@ -84,11 +102,12 @@ class DatasetAssembly(Dataset):
                 velocity = np.diff(seq[:, :1], axis=0)
                 velocity = np.append(velocity, velocity[[-1]], axis=0)
             seq = seq.copy()
-            seq[:, 1:] -= seq[:, :1]
+            seq[:, 1:] -= seq[:, :1]  # ensure wrist-relative coordinates like legacy pipeline
             if self.use_vel:
                 seq = np.concatenate((seq, velocity), axis=1)
-            seq_name = os.path.basename(file_path)
+            seq_name = f"{self.dataset_name}_{self.mode}_{seq_idx:06d}"
             sequences[seq_name] = seq.astype(np.float32)
+            norm_factor = getattr(selected_ds, "norm_factors", [1.0])[seq_idx]
             self.norm_factors[seq_name] = float(norm_factor)
 
         if not sequences:

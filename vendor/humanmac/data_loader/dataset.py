@@ -90,8 +90,6 @@ class Dataset:
     
     def sample_iter_action(self, action_category, dataset_type):
         # subject = np.random.choice(self.subjects)
-        if dataset_type != 'assembly':
-            raise NotImplementedError("Only assembly is supported in this pruned build.")
         first_subject = next(iter(self.data.keys()))
         dict_s = self.data[first_subject]
         # dict_s = self.data['S9']
@@ -109,8 +107,6 @@ class Dataset:
     
     def prepare_iter_action(self, dataset_type):
         # subject = np.random.choice(self.subjects)
-        if dataset_type != 'assembly':
-            raise NotImplementedError("Only assembly is supported in this pruned build.")
         first_subject = next(iter(self.data.keys()))
         dict_s = self.data[first_subject]
         # dict_s = self.data['S9']
@@ -155,5 +151,4 @@ class Dataset:
                 for i in range(0, seq_len - self.t_total, step):
                     traj = seq[None, i: i + self.t_total]
                     yield traj
-
 

@@ -1,7 +1,7 @@
 model: twostage_dct_diffusion
 enabled: true
 train:
-  epochs: 50
+  epochs: 100
 eval: {}
 options: {}
 defaults:

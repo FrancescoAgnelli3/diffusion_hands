@@ -85,6 +85,8 @@ class Config:
         self.action_filter = cfg.get('action_filter', '')
         self.time_interp = cfg.get('time_interp', None)
         self.window_norm = cfg.get('window_norm', self.t_his)
+        self.stride = cfg.get('stride', 5)
+        self.splineeqnet_root = cfg.get('splineeqnet_root', '/home/agnelli/projects/diffusion_hands/vendor/splineeqnet')
 
         self.padding = cfg['padding']
         self.Complete = cfg['Complete']
@@ -104,7 +106,5 @@ class Config:
         self.mpjpe_best_of_k = cfg.get('mpjpe_best_of_k', 1)
 
         # indirect variable
-        if self.dataset != 'assembly':
-            raise NotImplementedError(f"Unsupported dataset '{self.dataset}' in this pruned build.")
         self.joint_num = 20
         self.idx_pad, self.zero_index = generate_pad(self.padding, self.t_his, self.t_pred)

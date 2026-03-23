@@ -307,7 +307,7 @@ def run_twostage(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
     return normalize_metrics_dict(row)
 
 
-def run_belfusion(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_belfusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "belfusion"
     mcfg = cfg.get("models", {}).get("belfusion", {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
@@ -317,7 +317,7 @@ def run_belfusion(data_dir: Path, action_filter: str, cfg: dict, run_id: str) ->
 
     template["seed"] = int(cfg["seed"])
     template.setdefault("data", {})
-    template["data"]["dataset"] = "assembly"
+    template["data"]["dataset"] = str(dataset).lower()
     template["data"]["data_dir"] = str(data_dir)
     template["data"]["action_filter"] = str(action_filter)
     template["data"]["input_n"] = int(pp["input_n"])
@@ -369,7 +369,7 @@ def run_belfusion(data_dir: Path, action_filter: str, cfg: dict, run_id: str) ->
         return normalize_metrics_dict(row)
 
 
-def run_comusion(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_comusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "comusion"
     mcfg = cfg.get("models", {}).get("comusion", {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
@@ -380,7 +380,7 @@ def run_comusion(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> 
         raise RuntimeError("Missing models.comusion.defaults in experiment model YAML.")
     template["t_his"] = int(pp["input_n"])
     template["t_pred"] = int(pp["output_n"])
-    template["data_specs"]["dataset"] = "assembly"
+    template["data_specs"]["dataset"] = str(dataset).lower()
     template["data_specs"]["data_dir"] = str(data_dir)
     template["data_specs"]["action_filter"] = str(action_filter)
     template["data_specs"]["stride"] = int(pp["stride"])
@@ -428,7 +428,7 @@ def run_comusion(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> 
     return normalize_metrics_dict(row)
 
 
-def run_dlow_cvae(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_dlow_cvae(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "dlow"
     mcfg = cfg.get("models", {}).get("dlow_cvae", {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
@@ -437,7 +437,7 @@ def run_dlow_cvae(data_dir: Path, action_filter: str, cfg: dict, run_id: str) ->
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
         raise RuntimeError("Missing models.dlow_cvae.defaults in experiment model YAML.")
-    template["dataset"] = "assembly"
+    template["dataset"] = str(dataset).lower()
     template["data_dir"] = str(data_dir)
     template["action_filter"] = str(action_filter)
     template["t_his"] = int(pp["input_n"])
@@ -445,6 +445,7 @@ def run_dlow_cvae(data_dir: Path, action_filter: str, cfg: dict, run_id: str) ->
     template["stride"] = int(pp["stride"])
     template["time_interp"] = pp.get("time_interp")
     template["window_norm"] = pp.get("window_norm")
+    template["splineeqnet_root"] = str(VENDOR / "splineeqnet")
     template["seed"] = int(cfg["seed"])
     template["nk"] = int(cfg["num_candidates"])
     train_epochs = mcfg.get("train", {}).get("epochs")
@@ -501,7 +502,7 @@ def run_dlow_cvae(data_dir: Path, action_filter: str, cfg: dict, run_id: str) ->
     return normalize_metrics_dict(out)
 
 
-def run_humanmac(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_humanmac(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "humanmac"
     mcfg = cfg.get("models", {}).get("humanmac", {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
@@ -510,13 +511,15 @@ def run_humanmac(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> 
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
         raise RuntimeError("Missing models.humanmac.defaults in experiment model YAML.")
-    template["dataset"] = "assembly"
+    template["dataset"] = str(dataset).lower()
     template["data_dir"] = str(data_dir)
     template["action_filter"] = str(action_filter)
     template["t_his"] = int(pp["input_n"])
     template["t_pred"] = int(pp["output_n"])
     template["time_interp"] = pp.get("time_interp")
     template["window_norm"] = int(pp["window_norm"]) if pp.get("window_norm") is not None else int(pp["input_n"])
+    template["stride"] = int(pp["stride"])
+    template["splineeqnet_root"] = str(VENDOR / "splineeqnet")
     template["mpjpe_best_of_k"] = int(cfg["num_candidates"])
     train_epochs = mcfg.get("train", {}).get("epochs")
     if train_epochs is not None:
@@ -594,7 +597,7 @@ def run_humanmac(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> 
     return normalize_metrics_dict(out)
 
 
-def run_skeletondiffusion(data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "skeletondiffusion"
     mcfg = cfg.get("models", {}).get("skeletondiffusion", {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
@@ -621,6 +624,14 @@ def run_skeletondiffusion(data_dir: Path, action_filter: str, cfg: dict, run_id:
     pred_sec = float(pp["output_n"]) / float(fps)
     time_interp_val = _hydra_value(pp.get("time_interp"))
     window_norm_val = _hydra_value(pp.get("window_norm"))
+    dataset_lower = str(dataset).lower()
+    wrist_indices_by_dataset = {
+        "assembly": "[5,26]",
+        "h2o": "[5,26]",
+        "bighands": "[0]",
+        "fpha": "[0]",
+    }
+    wrist_indices_hydra = wrist_indices_by_dataset.get(dataset_lower, "[5,26]")
 
     autoenc_out = run_root / "autoencoder"
     diff_out = run_root / "diffusion"
@@ -635,9 +646,11 @@ def run_skeletondiffusion(data_dir: Path, action_filter: str, cfg: dict, run_id:
         [
             "dataset=assembly",
             "task=assembly_hmp",
+            f"dataset.assembly_dataset_name={dataset}",
             f"dataset.assembly_splineeqnet_root={VENDOR / 'splineeqnet'}",
             f"dataset.assembly_data_dir={data_dir}",
             f"dataset.assembly_action_filter={action_filter}",
+            f"dataset.assembly_wrist_indices={wrist_indices_hydra}",
             f"task.history_sec={hist_sec}",
             f"task.prediction_horizon_sec={pred_sec}",
             f"dataset.assembly_time_interp={time_interp_val}",
@@ -694,11 +707,13 @@ def run_skeletondiffusion(data_dir: Path, action_filter: str, cfg: dict, run_id:
             "task=assembly_hmp",
             "dataset_split=test",
             "assembly_split_strategy=test",
+            f"assembly_dataset_name={dataset}",
             f"checkpoint_path={diff_ckpt}",
             "if_use_splineeqnet_assembly_pipeline=True",
             f"assembly_splineeqnet_root={VENDOR / 'splineeqnet'}",
             f"assembly_data_dir={data_dir}",
             f"assembly_action_filter={action_filter}",
+            f"assembly_wrist_indices={wrist_indices_hydra}",
             f"task.history_sec={hist_sec}",
             f"task.prediction_horizon_sec={pred_sec}",
             f"obs_length={int(pp['input_n'])}",
@@ -718,7 +733,7 @@ def run_skeletondiffusion(data_dir: Path, action_filter: str, cfg: dict, run_id:
     if rc != 0:
         raise RuntimeError("skeletondiffusion eval failed")
 
-    eval_yamls = sorted(glob.glob(str(diff_out / "**" / "results_*_assembly.yaml"), recursive=True), key=os.path.getmtime)
+    eval_yamls = sorted(glob.glob(str(diff_out / "**" / f"results_*_{dataset}.yaml"), recursive=True), key=os.path.getmtime)
     if not eval_yamls:
         raise RuntimeError("skeletondiffusion eval yaml not found")
     with open(eval_yamls[-1], "r", encoding="utf-8") as f:
@@ -788,7 +803,6 @@ def main() -> None:
         ("humanmac", run_humanmac),
         ("skeletondiffusion", run_skeletondiffusion),
     ]
-
     for dataset in datasets:
         configured_action_filter = str(cfg.get("action_filter", ""))
         # Apply action_filter only to assembly; keep other datasets unfiltered.
@@ -810,7 +824,7 @@ def main() -> None:
                 "notes": "",
             }
             try:
-                if model_name == "twostage_dct_diffusion":
+                if model_name in {"twostage_dct_diffusion", "belfusion", "comusion", "dlow_cvae", "humanmac", "skeletondiffusion"}:
                     metrics = fn(dataset, data_dir, action_filter, cfg, run_id)
                 else:
                     metrics = fn(data_dir, action_filter, cfg, run_id)

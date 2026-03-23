@@ -39,6 +39,7 @@ class Config:
         self.stride = cfg.get('stride', self.t_his)
         self.time_interp = cfg.get('time_interp', None)
         self.window_norm = cfg.get('window_norm', self.t_his)
+        self.splineeqnet_root = cfg.get('splineeqnet_root', '')
 
         # vae
         self.nz = cfg['nz']

@@ -10,6 +10,7 @@ dtype: float32
 
 # SplineEqNet-compatible preprocessing source.
 assembly_splineeqnet_root: /home/agnelli/projects/4D_hands_working/SplineEqNet
+assembly_dataset_name: assembly
 assembly_data_dir: ""
 assembly_action_filter: ""
 assembly_wrist_indices: [5, 26]

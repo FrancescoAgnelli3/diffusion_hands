@@ -85,10 +85,22 @@ def compute_metrics_assembly(
     build_datasets = data_mod.build_datasets
     make_loaders = data_mod.make_loaders
 
-    metadata = get_dataset_metadata("assembly")
+    dataset_name = str(config.get("assembly_dataset_name", "assembly")).lower()
+    metadata = get_dataset_metadata(dataset_name)
     data_dir = config.get("assembly_data_dir") or metadata.get("default_dir", "")
-    action_filter = config.get("assembly_action_filter") or metadata.get("default_action_filter", "")
-    print(f"[Assembly eval] Using data_dir='{data_dir}' | action_filter='{action_filter}' (from SplineEqNet defaults if not overridden)")
+    action_filter = (
+        metadata.get("default_action_filter", "")
+        if config.get("assembly_action_filter") is None
+        else str(config.get("assembly_action_filter"))
+    )
+    print(
+        f"[SplineEqNet eval] dataset='{dataset_name}' | data_dir='{data_dir}' | "
+        f"action_filter='{action_filter}'"
+    )
+
+    default_wrist_indices = tuple(int(x) for x in metadata.get("default_wrist_indices", (5, 26)))
+    requested_wrist_indices = tuple(int(x) for x in config.get("assembly_wrist_indices", default_wrist_indices))
+    wrist_indices = requested_wrist_indices if len(requested_wrist_indices) == len(default_wrist_indices) else default_wrist_indices
 
     ds_cfg = DatasetCfg(
         data_dir=data_dir,
@@ -101,8 +113,8 @@ def compute_metrics_assembly(
         batch_size=int(batch_size),
         eval_batch_mult=int(config.get("assembly_eval_batch_mult", 1)),
         seed=int(config["seed"]),
-        wrist_indices=tuple(int(x) for x in config.get("assembly_wrist_indices", metadata.get("default_wrist_indices", (5, 26)))),
-        dataset="assembly",
+        wrist_indices=wrist_indices,
+        dataset=dataset_name,
         node_count=int(metadata.get("node_count", 21)),
     )
 
@@ -238,7 +250,7 @@ def compute_metrics_assembly(
         if isinstance(value, torch.Tensor):
             results[key] = float(value.item())
 
-    ov_path = os.path.join(store_folder, f"results_{num_samples}_assembly.yaml")
+    ov_path = os.path.join(store_folder, f"results_{num_samples}_{dataset_name}.yaml")
     with open(ov_path, "w") as f:
         yaml.dump(results, f, indent=4)
     print(f"Overall results saved to {ov_path}")

@@ -60,6 +60,7 @@ def _augment(obs: torch.Tensor, pred: torch.Tensor, da_mirroring: float, da_rota
 
 def _cache_key(
     seed: int,
+    dataset_name: str,
     data_dir: str,
     action_filter: str,
     obs_length: int,
@@ -72,6 +73,7 @@ def _cache_key(
 ):
     return (
         int(seed),
+        str(dataset_name).lower(),
         os.path.abspath(data_dir),
         str(action_filter),
         int(obs_length),
@@ -111,6 +113,7 @@ class AssemblyDataset(Dataset):
         noise_std: float = 0.03,
         seed: int = 0,
         assembly_splineeqnet_root: str = "/home/agnelli/projects/4D_hands_working/SplineEqNet",
+        assembly_dataset_name: str = "assembly",
         assembly_data_dir: str = "",
         assembly_action_filter: str = "",
         assembly_wrist_indices=(5, 26),
@@ -140,14 +143,26 @@ class AssemblyDataset(Dataset):
         get_dataset_metadata = data_mod.get_dataset_metadata
         build_datasets = data_mod.build_datasets
 
-        metadata = get_dataset_metadata("assembly")
+        dataset_name = str(assembly_dataset_name).lower()
+        metadata = get_dataset_metadata(dataset_name)
         data_dir = assembly_data_dir or metadata.get("default_dir", "")
-        action_filter = assembly_action_filter or metadata.get("default_action_filter", "")
+        # Keep empty-string override as a valid value (do not fall back to defaults).
+        action_filter = (
+            metadata.get("default_action_filter", "")
+            if assembly_action_filter is None
+            else str(assembly_action_filter)
+        )
         self.assembly_data_dir = data_dir
         self.assembly_action_filter = action_filter
-        wrist_indices = tuple(int(x) for x in assembly_wrist_indices)
+        default_wrist_indices = tuple(int(x) for x in metadata.get("default_wrist_indices", (5, 26)))
+        try:
+            wrist_indices_raw = tuple(int(x) for x in assembly_wrist_indices)
+        except Exception:
+            wrist_indices_raw = default_wrist_indices
+        wrist_indices = wrist_indices_raw if len(wrist_indices_raw) == len(default_wrist_indices) else default_wrist_indices
         key = _cache_key(
             seed=seed,
+            dataset_name=dataset_name,
             data_dir=data_dir,
             action_filter=action_filter,
             obs_length=self.obs_length,
@@ -172,7 +187,7 @@ class AssemblyDataset(Dataset):
                 eval_batch_mult=1,
                 seed=int(seed),
                 wrist_indices=wrist_indices,
-                dataset="assembly",
+                dataset=dataset_name,
                 node_count=int(metadata.get("node_count", 21)),
             )
             _DATASET_CACHE[key] = build_datasets(ds_cfg)
@@ -182,7 +197,8 @@ class AssemblyDataset(Dataset):
         if not silent:
             print(
                 f"Constructed AssemblyDataset split='{self.split}' with {len(self.dataset)} samples | "
-                f"data_dir='{self.assembly_data_dir}' | action_filter='{self.assembly_action_filter}'"
+                f"dataset='{dataset_name}' | data_dir='{self.assembly_data_dir}' | "
+                f"action_filter='{self.assembly_action_filter}'"
             )
 
     def eval(self):

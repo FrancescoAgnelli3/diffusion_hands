@@ -148,6 +148,7 @@ if __name__ == '__main__':
         t_his,
         t_pred,
         actions='all',
+        dataset_name=cfg.dataset,
         use_vel=cfg.use_vel,
         data_dir=cfg.data_dir,
         action_filter=cfg.action_filter,
@@ -155,6 +156,7 @@ if __name__ == '__main__':
         seed=cfg.seed,
         time_interp=cfg.time_interp,
         window_norm=cfg.window_norm,
+        splineeqnet_root=getattr(cfg, 'splineeqnet_root', ''),
     )
     if cfg.normalize_data:
         dataset.normalize_data()
@@ -164,6 +166,7 @@ if __name__ == '__main__':
         t_his,
         t_pred,
         actions='all',
+        dataset_name=cfg.dataset,
         use_vel=cfg.use_vel,
         data_dir=cfg.data_dir,
         action_filter=cfg.action_filter,
@@ -171,6 +174,7 @@ if __name__ == '__main__':
         seed=cfg.seed,
         time_interp=cfg.time_interp,
         window_norm=cfg.window_norm,
+        splineeqnet_root=getattr(cfg, 'splineeqnet_root', ''),
     )
     if cfg.normalize_data:
         eval_dataset.normalize_data(dataset.mean, dataset.std)

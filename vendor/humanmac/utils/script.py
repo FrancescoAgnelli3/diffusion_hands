@@ -46,47 +46,53 @@ def dataset_split(cfg):
     dataset_dict has two keys: 'train', 'test' for enumeration in train and validation.
     dataset_multi_test is used to create multi-modal data for metrics.
     """
-    if cfg.dataset == 'assembly':
-        train_subset_files = getattr(cfg, 'train_subset_files', None)
-        test_subset_files = getattr(cfg, 'test_subset_files', None)
-        dataset = DatasetAssembly(
-            'train',
-            cfg.t_his,
-            cfg.t_pred,
-            actions='all',
-            data_dir=cfg.data_dir,
-            action_filter=cfg.action_filter,
-            seed=cfg.seed,
-            subset_files=train_subset_files,
-            time_interp=getattr(cfg, 'time_interp', None),
-            window_norm=getattr(cfg, 'window_norm', cfg.t_his),
-        )
-        dataset_test = DatasetAssembly(
-            'test',
-            cfg.t_his,
-            cfg.t_pred,
-            actions='all',
-            data_dir=cfg.data_dir,
-            action_filter=cfg.action_filter,
-            seed=cfg.seed,
-            subset_files=test_subset_files,
-            time_interp=getattr(cfg, 'time_interp', None),
-            window_norm=getattr(cfg, 'window_norm', cfg.t_his),
-        )
-        dataset_multi_test = DatasetAssemblyMulti(
-            'test',
-            cfg.t_his,
-            cfg.t_pred,
-            actions='all',
-            data_dir=cfg.data_dir,
-            action_filter=cfg.action_filter,
-            seed=cfg.seed,
-            subset_files=test_subset_files,
-            time_interp=getattr(cfg, 'time_interp', None),
-            window_norm=getattr(cfg, 'window_norm', cfg.t_his),
-        )
-    else:
-        raise NotImplementedError(f"Unsupported dataset in this pruned build: '{cfg.dataset}'.")
+    train_subset_files = getattr(cfg, 'train_subset_files', None)
+    test_subset_files = getattr(cfg, 'test_subset_files', None)
+    dataset = DatasetAssembly(
+        'train',
+        cfg.t_his,
+        cfg.t_pred,
+        actions='all',
+        dataset_name=cfg.dataset,
+        splineeqnet_root=getattr(cfg, 'splineeqnet_root', '/home/agnelli/projects/diffusion_hands/vendor/splineeqnet'),
+        data_dir=cfg.data_dir,
+        action_filter=cfg.action_filter,
+        seed=cfg.seed,
+        subset_files=train_subset_files,
+        time_interp=getattr(cfg, 'time_interp', None),
+        window_norm=getattr(cfg, 'window_norm', cfg.t_his),
+        stride=getattr(cfg, 'stride', 5),
+    )
+    dataset_test = DatasetAssembly(
+        'test',
+        cfg.t_his,
+        cfg.t_pred,
+        actions='all',
+        dataset_name=cfg.dataset,
+        splineeqnet_root=getattr(cfg, 'splineeqnet_root', '/home/agnelli/projects/diffusion_hands/vendor/splineeqnet'),
+        data_dir=cfg.data_dir,
+        action_filter=cfg.action_filter,
+        seed=cfg.seed,
+        subset_files=test_subset_files,
+        time_interp=getattr(cfg, 'time_interp', None),
+        window_norm=getattr(cfg, 'window_norm', cfg.t_his),
+        stride=getattr(cfg, 'stride', 5),
+    )
+    dataset_multi_test = DatasetAssemblyMulti(
+        'test',
+        cfg.t_his,
+        cfg.t_pred,
+        actions='all',
+        dataset_name=cfg.dataset,
+        splineeqnet_root=getattr(cfg, 'splineeqnet_root', '/home/agnelli/projects/diffusion_hands/vendor/splineeqnet'),
+        data_dir=cfg.data_dir,
+        action_filter=cfg.action_filter,
+        seed=cfg.seed,
+        subset_files=test_subset_files,
+        time_interp=getattr(cfg, 'time_interp', None),
+        window_norm=getattr(cfg, 'window_norm', cfg.t_his),
+        stride=getattr(cfg, 'stride', 5),
+    )
 
     return {'train': dataset, 'test': dataset_test}, dataset_multi_test
 

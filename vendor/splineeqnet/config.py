@@ -26,6 +26,11 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "simlpe_mix_spatial_temporal": None,
         "simlpe_add_last_offset": True,
         "epochs": 50,
+        "early_stopping_enabled": True,
+        "early_stopping_patience": 20,
+        "early_stopping_min_delta": 1e-4,
+        "early_stopping_warmup": 10,
+        "early_stopping_monitor": "auto",
     },
     "twostage_dct_diffusion": {
         "model": "twostage_dct_diffusion",
@@ -64,6 +69,11 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_mamp_motion_aware_tau": 0.80,
         "twostage_mpjpe_weight": 0.0,
         "epochs": 50,
+        "early_stopping_enabled": True,
+        "early_stopping_patience": 20,
+        "early_stopping_min_delta": 1e-4,
+        "early_stopping_warmup": 10,
+        "early_stopping_monitor": "auto",
     },
 }
 
@@ -102,6 +112,11 @@ class TrainCfg:
     save_eval_examples_all_k: bool = False
     save_coarse_model: bool = False
     use_space: bool = True
+    early_stopping_enabled: bool = False
+    early_stopping_patience: int = 20
+    early_stopping_min_delta: float = 1e-4
+    early_stopping_warmup: int = 0
+    early_stopping_monitor: str = "auto"
 
     # Shared SiMLPe-DCT knobs
     dct_keep_coeffs: Optional[int] = 100

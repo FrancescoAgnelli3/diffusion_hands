@@ -2,14 +2,14 @@ model: twostage_dct_diffusion
 enabled: true
 train:
   epochs: 100
-eval: {}
-options: {}
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0001
+    warmup: 10
+    monitor: auto
 defaults:
-  model: twostage_dct_diffusion
-  input_n: 70
-  output_n: 30
-  stride: 5
-  batch_size: 512
+  batch_size: 64
   lr: 0.001
   hidden_size: 128
   gru_layers: 8
@@ -23,10 +23,10 @@ defaults:
   simlpe_add_last_offset: true
   twostage_k_low: 80
   twostage_diffusion_epochs: 500
-  twostage_diffusion_steps: 100
-  twostage_ddim_steps: 50
-  twostage_denoiser_dim: 64
-  twostage_denoiser_depth: 4
+  twostage_diffusion_steps: 10
+  twostage_ddim_steps: 10
+  twostage_denoiser_dim: 256
+  twostage_denoiser_depth: 8
   twostage_denoiser_heads: 4
   twostage_dropout: 0.0
   twostage_freeze_coarse: true
@@ -40,4 +40,3 @@ defaults:
   twostage_mamp_mask_ratio: 0.0
   twostage_mamp_motion_aware_tau: 0.8
   twostage_mpjpe_weight: 0.0
-  epochs: 50

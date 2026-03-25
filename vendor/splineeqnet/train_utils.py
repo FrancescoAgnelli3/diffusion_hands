@@ -710,6 +710,44 @@ def train(
         cond_use_coarse = bool(config.get("twostage_cond_use_coarse", True))
         residual_ema_decay = float(config.get("twostage_residual_ema_decay", 0.99))
         residual_rms_eps = float(config.get("twostage_residual_rms_eps", 1e-6))
+        twostage_wrist_cfg = config.get("twostage_wrist_index")
+        if twostage_wrist_cfg is None:
+            twostage_wrist_index = int(ordered_wrists[0]) if ordered_wrists else 0
+        else:
+            twostage_wrist_index = int(twostage_wrist_cfg)
+        if not (0 <= twostage_wrist_index < node_num):
+            raise ValueError(
+                f"twostage_wrist_index must be in [0, {node_num - 1}], got {twostage_wrist_index}"
+            )
+
+        raw_twostage_links = config.get("twostage_links", ())
+        twostage_links: List[Tuple[int, int]] = []
+        if isinstance(raw_twostage_links, (list, tuple)):
+            for pair in raw_twostage_links:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    continue
+                try:
+                    i, j = int(pair[0]), int(pair[1])
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= i < node_num and 0 <= j < node_num and i != j:
+                    if i > j:
+                        i, j = j, i
+                    twostage_links.append((i, j))
+        if not twostage_links:
+            twostage_links = []
+            for i, j in edge_pairs:
+                if i == j:
+                    continue
+                if i > j:
+                    i, j = j, i
+                twostage_links.append((int(i), int(j)))
+        twostage_links = sorted(set(twostage_links))
+        if not twostage_links:
+            raise ValueError(
+                "twostage requires non-empty hand links. "
+                "Provide config['twostage_links'] or ensure edge_index/adjacency includes hand edges."
+            )
 
         tw_cfg = TwoStageDCTDiffusionConfig(
             input_length=input_n,
@@ -735,7 +773,13 @@ def train(
             simlpe_norm_axis=str(config.get("simlpe_norm_axis", "spatial")),
             simlpe_add_last_offset=bool(config.get("simlpe_add_last_offset", True)),
         )
-        twostage_model = TwoStageDCTDiffusionForecaster(tw_cfg).to(device)
+        twostage_model = TwoStageDCTDiffusionForecaster(
+            tw_cfg,
+            metadata={
+                "wrist_index": int(twostage_wrist_index),
+                "edges": tuple((int(i), int(j)) for i, j in twostage_links),
+            },
+        ).to(device)
         if twostage_use_any_mamp_condition:
             if not twostage_mamp_checkpoint:
                 raise ValueError(
@@ -1270,6 +1314,8 @@ def train(
                     twostage_mamp_feat = None
                     coarse_future_for_condition = None
                     if model == "twostage_dct_diffusion" and twostage_phase != "coarse":
+                        # Cache coarse prediction once per eval batch and reuse for all sampled candidates.
+                        coarse_future_for_condition = twostage_model.coarse(in_3d)
                         twostage_mamp_hist_feat = None
                         twostage_mamp_coarse_feat = None
                         if twostage_use_mamp_condition:
@@ -1280,9 +1326,7 @@ def train(
                         if twostage_use_mamp_condition_coarse:
                             if cached_mamp_feat_coarse is not None:
                                 twostage_mamp_coarse_feat = cached_mamp_feat_coarse.to(device=device).float()
-                                coarse_future_for_condition = twostage_model.coarse(in_3d)
                             else:
-                                coarse_future_for_condition = twostage_model.coarse(in_3d)
                                 twostage_mamp_coarse_feat = _compute_mamp_feat(coarse_future_for_condition)
                         twostage_mamp_feat = _merge_mamp_features(twostage_mamp_hist_feat, twostage_mamp_coarse_feat)
 
@@ -1561,6 +1605,14 @@ def train(
     total_epochs = train_epochs
     if model == "twostage_dct_diffusion":
         total_epochs = train_epochs + max(0, twostage_diffusion_epochs)
+    early_stop_enabled = bool(config.get("early_stopping_enabled", False))
+    early_stop_patience = max(1, int(config.get("early_stopping_patience", 20)))
+    early_stop_min_delta = float(config.get("early_stopping_min_delta", 1e-4))
+    early_stop_warmup = max(0, int(config.get("early_stopping_warmup", 0)))
+    early_stop_monitor = str(config.get("early_stopping_monitor", "auto")).strip().lower()
+    early_stop_reset_on_phase_change = bool(config.get("early_stopping_reset_on_phase_change", True))
+    early_stop_best: Optional[float] = None
+    early_stop_bad_epochs = 0
 
     for epoch in range(1, total_epochs + 1):
         if model == "twostage_dct_diffusion" and twostage_phase == "coarse":
@@ -1590,6 +1642,9 @@ def train(
                     _precompute_mamp_features_for_dataset(
                         getattr(test_loader, "dataset", None), "test", feature_key="coarse", source="coarse"
                     )
+                if early_stop_reset_on_phase_change:
+                    early_stop_best = None
+                    early_stop_bad_epochs = 0
                 print(f"[Info] Switched to twostage diffusion training for {twostage_diffusion_epochs} epochs.")
         _set_mode(True)
         running = 0.0
@@ -1678,7 +1733,9 @@ def train(
                 if twostage_phase == "diffusion":
                     twostage_mamp_hist_feat = None
                     twostage_mamp_coarse_feat = None
-                    coarse_future_for_condition = None
+                    # Cache coarse prediction once per train batch during diffusion phase.
+                    with torch.no_grad():
+                        coarse_future_for_condition = twostage_model.coarse(in_3d)
                     if twostage_use_mamp_condition:
                         if cached_mamp_feat is not None:
                             twostage_mamp_hist_feat = cached_mamp_feat.to(device=device).float()
@@ -1687,11 +1744,7 @@ def train(
                     if twostage_use_mamp_condition_coarse:
                         if cached_mamp_feat_coarse is not None:
                             twostage_mamp_coarse_feat = cached_mamp_feat_coarse.to(device=device).float()
-                            with torch.no_grad():
-                                coarse_future_for_condition = twostage_model.coarse(in_3d)
                         else:
-                            with torch.no_grad():
-                                coarse_future_for_condition = twostage_model.coarse(in_3d)
                             twostage_mamp_coarse_feat = _compute_mamp_feat(coarse_future_for_condition)
                     twostage_mamp_feat = _merge_mamp_features(twostage_mamp_hist_feat, twostage_mamp_coarse_feat)
                     diffusion_loss, coarse_pred = twostage_model.diffusion_loss(
@@ -1983,6 +2036,42 @@ def train(
             if scheduler is not None:
                 scheduler.step(float(epoch_loss))
 
+        if early_stop_enabled:
+            if early_stop_monitor == "test_mpjpe":
+                monitored = avg_loss
+            elif early_stop_monitor == "train_mpjpe":
+                monitored = mpjpe_avg
+            elif early_stop_monitor in {"train_loss", "loss"}:
+                monitored = epoch_loss
+            else:
+                monitored = avg_loss if avg_loss is not None else epoch_loss
+            if monitored is None or not math.isfinite(float(monitored)):
+                print("[EarlyStop] Monitored value is not finite; skipping early-stop check for this epoch.")
+            elif epoch > early_stop_warmup:
+                monitored_f = float(monitored)
+                improved = early_stop_best is None or (monitored_f < (float(early_stop_best) - early_stop_min_delta))
+                if improved:
+                    early_stop_best = monitored_f
+                    early_stop_bad_epochs = 0
+                else:
+                    early_stop_bad_epochs += 1
+                    if early_stop_bad_epochs >= early_stop_patience:
+                        if model == "twostage_dct_diffusion" and twostage_phase == "coarse" and twostage_diffusion_epochs > 0:
+                            train_epochs = epoch
+                            early_stop_best = None
+                            early_stop_bad_epochs = 0
+                            print(
+                                f"[EarlyStop] Coarse stage stopped at epoch {epoch}; "
+                                "switching to twostage diffusion stage."
+                            )
+                        else:
+                            print(
+                                f"[EarlyStop] Stopping at epoch {epoch} "
+                                f"(monitor={early_stop_monitor or 'auto'}, best={early_stop_best:.6f}, "
+                                f"current={monitored_f:.6f}, patience={early_stop_patience}, min_delta={early_stop_min_delta})."
+                            )
+                            break
+
     last_state = _capture_state()
 
     if mask_logging_enabled and mask_epoch_history:
@@ -2015,6 +2104,8 @@ def train(
         val_humanmac_fde_best = float(val_metrics_best.get("humanmac_fde", float("nan")))
         val_humanmac_mmade_best = float(val_metrics_best.get("humanmac_mmade", float("nan")))
         val_humanmac_mmfde_best = float(val_metrics_best.get("humanmac_mmfde", float("nan")))
+        val_humanmac_cmd_best = float(val_metrics_best.get("humanmac_cmd", float("nan")))
+        val_humanmac_fid_best = float(val_metrics_best.get("humanmac_fid", float("nan")))
         val_samples = int(val_metrics_best["samples"])
         ref_epoch = best_test_epoch if best_test_epoch is not None else "final"
         print(
@@ -2026,7 +2117,8 @@ def train(
             print(
                 f"[Validation HumanMAC @ epoch {ref_epoch}] APD={val_humanmac_apd_best:.6f} | "
                 f"ADE={val_humanmac_ade_best:.6f} | FDE={val_humanmac_fde_best:.6f} | "
-                f"MMADE={val_humanmac_mmade_best:.6f} | MMFDE={val_humanmac_mmfde_best:.6f}"
+                f"MMADE={val_humanmac_mmade_best:.6f} | MMFDE={val_humanmac_mmfde_best:.6f} | "
+                f"CMD={val_humanmac_cmd_best:.6f} | FID={val_humanmac_fid_best:.6f}"
             )
     else:
         val_mpjpe_best = None
@@ -2038,6 +2130,8 @@ def train(
         val_humanmac_fde_best = None
         val_humanmac_mmade_best = None
         val_humanmac_mmfde_best = None
+        val_humanmac_cmd_best = None
+        val_humanmac_fid_best = None
         val_samples = 0
 
     best_model_path = config.get("best_model_path")
@@ -2087,6 +2181,8 @@ def train(
         "validation_humanmac_fde_best": val_humanmac_fde_best if val_loader is not None else None,
         "validation_humanmac_mmade_best": val_humanmac_mmade_best if val_loader is not None else None,
         "validation_humanmac_mmfde_best": val_humanmac_mmfde_best if val_loader is not None else None,
+        "validation_humanmac_cmd_best": val_humanmac_cmd_best if val_loader is not None else None,
+        "validation_humanmac_fid_best": val_humanmac_fid_best if val_loader is not None else None,
         "validation_samples": float(val_samples) if val_loader is not None else None,
         "validation_mpjpe_by_try": (
             val_metrics_best.get("mpjpe_by_try") if val_metrics_best is not None else None

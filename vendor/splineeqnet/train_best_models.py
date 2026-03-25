@@ -43,6 +43,8 @@ FIELDNAMES = [
     "validation_humanmac_fde_best",
     "validation_humanmac_mmade_best",
     "validation_humanmac_mmfde_best",
+    "validation_humanmac_cmd_best",
+    "validation_humanmac_fid_best",
     "test_mpjpe_best",
     "test_mpjpe_norm_best",
     "test_humanmac_apd_best",
@@ -50,6 +52,8 @@ FIELDNAMES = [
     "test_humanmac_fde_best",
     "test_humanmac_mmade_best",
     "test_humanmac_mmfde_best",
+    "test_humanmac_cmd_best",
+    "test_humanmac_fid_best",
 ]
 
 
@@ -184,6 +188,11 @@ def _build_train_cfg(
         gradient_clip=_coerce_required(best_cfg.get("gradient_clip"), float, default=10.0),
         bone_loss_weight=_coerce_required(best_cfg.get("bone_loss_weight"), float, default=0.0),
         use_space=use_space,
+        early_stopping_enabled=_coerce_required(best_cfg.get("early_stopping_enabled"), bool, default=True),
+        early_stopping_patience=_coerce_required(best_cfg.get("early_stopping_patience"), int, default=20),
+        early_stopping_min_delta=_coerce_required(best_cfg.get("early_stopping_min_delta"), float, default=1e-4),
+        early_stopping_warmup=_coerce_required(best_cfg.get("early_stopping_warmup"), int, default=0),
+        early_stopping_monitor=_coerce_required(best_cfg.get("early_stopping_monitor"), str, default="auto"),
     )
 
     cfg.dct_keep_coeffs = _coerce_optional(best_cfg.get("dct_keep_coeffs"), int)
@@ -271,6 +280,8 @@ def _prepare_result_row(ds_cfg: DatasetCfg, train_cfg: TrainCfg, metrics: Dict[s
         "validation_humanmac_fde_best": metrics.get("validation_humanmac_fde_best"),
         "validation_humanmac_mmade_best": metrics.get("validation_humanmac_mmade_best"),
         "validation_humanmac_mmfde_best": metrics.get("validation_humanmac_mmfde_best"),
+        "validation_humanmac_cmd_best": metrics.get("validation_humanmac_cmd_best"),
+        "validation_humanmac_fid_best": metrics.get("validation_humanmac_fid_best"),
         "test_mpjpe_best": metrics.get("test_mpjpe_best"),
         "test_mpjpe_norm_best": metrics.get("test_mpjpe_norm_best"),
         "test_humanmac_apd_best": metrics.get("test_humanmac_apd_best"),
@@ -278,6 +289,8 @@ def _prepare_result_row(ds_cfg: DatasetCfg, train_cfg: TrainCfg, metrics: Dict[s
         "test_humanmac_fde_best": metrics.get("test_humanmac_fde_best"),
         "test_humanmac_mmade_best": metrics.get("test_humanmac_mmade_best"),
         "test_humanmac_mmfde_best": metrics.get("test_humanmac_mmfde_best"),
+        "test_humanmac_cmd_best": metrics.get("test_humanmac_cmd_best"),
+        "test_humanmac_fid_best": metrics.get("test_humanmac_fid_best"),
     }
 
     row: Dict[str, object] = {}

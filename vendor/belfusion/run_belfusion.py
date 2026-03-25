@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import random
@@ -167,7 +168,7 @@ def evaluate_model(
     model.eval()
     mpjpe_vals: List[torch.Tensor] = []
     mpjpe_norm_vals: List[torch.Tensor] = []
-    hm_acc = {"APD": 0.0, "ADE": 0.0, "FDE": 0.0, "MMADE": 0.0, "MMFDE": 0.0}
+    hm_acc = {"APD": 0.0, "ADE": 0.0, "FDE": 0.0, "MMADE": 0.0, "MMFDE": 0.0, "CMD": 0.0, "FID": 0.0}
     n_batches = 0
 
     with torch.no_grad():
@@ -248,9 +249,19 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
     epochs = int(train_cfg["epochs"])
     kl_weight = float(train_cfg.get("kl_weight", 1e-3))
     l1_weight = float(train_cfg.get("l1_weight", 1.0))
+    es_enabled = bool(train_cfg.get("early_stopping_enabled", False))
+    es_patience = max(1, int(train_cfg.get("early_stopping_patience", 20)))
+    es_min_delta = float(train_cfg.get("early_stopping_min_delta", 1e-4))
+    es_warmup = max(0, int(train_cfg.get("early_stopping_warmup", 0)))
+    es_monitor = str(train_cfg.get("early_stopping_monitor", "auto")).strip().lower()
+    es_best = None
+    es_bad_epochs = 0
+    es_best_state = None
 
     for _epoch in range(1, epochs + 1):
         model.train()
+        train_loss_sum = 0.0
+        train_steps = 0
         for obs, fut, _norm in train_loader:
             obs = obs.to(device)
             fut = fut.to(device)
@@ -267,16 +278,56 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
+            train_loss_sum += float(loss.item())
+            train_steps += 1
 
+        train_loss_epoch = train_loss_sum / max(1, train_steps)
+        val_loss_epoch = None
         if val_loader is not None:
             model.eval()
+            val_loss_sum = 0.0
+            val_steps = 0
             with torch.no_grad():
                 for obs, fut, _norm in val_loader:
                     obs = obs.to(device)
                     fut = fut.to(device)
                     bs = obs.shape[0]
-                    _ = model(obs.reshape(bs, -1), fut.reshape(bs, -1))
-                    break
+                    obs_flat = obs.reshape(bs, -1)
+                    fut_flat = fut.reshape(bs, -1)
+                    recon, mu, logvar = model(obs_flat, fut_flat)
+                    recon_loss = F.mse_loss(recon, fut_flat) + l1_weight * F.l1_loss(recon, fut_flat)
+                    kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+                    val_loss = recon_loss + kl_weight * kl
+                    val_loss_sum += float(val_loss.item())
+                    val_steps += 1
+            val_loss_epoch = val_loss_sum / max(1, val_steps)
+
+        if es_enabled and _epoch > es_warmup:
+            if es_monitor == "val_loss":
+                monitored = val_loss_epoch
+            elif es_monitor in {"train_loss", "loss"}:
+                monitored = train_loss_epoch
+            else:
+                monitored = val_loss_epoch if val_loss_epoch is not None else train_loss_epoch
+
+            if monitored is not None and np.isfinite(float(monitored)):
+                monitored_f = float(monitored)
+                improved = es_best is None or monitored_f < (float(es_best) - es_min_delta)
+                if improved:
+                    es_best = monitored_f
+                    es_bad_epochs = 0
+                    es_best_state = copy.deepcopy(model.state_dict())
+                else:
+                    es_bad_epochs += 1
+                    if es_bad_epochs >= es_patience:
+                        print(
+                            f"[BeLFusion][EarlyStop] epoch={_epoch} monitor={es_monitor or 'auto'} "
+                            f"best={es_best:.6f} current={monitored_f:.6f}"
+                        )
+                        break
+
+    if es_best_state is not None:
+        model.load_state_dict(es_best_state)
 
     out_dir = Path(str(runtime_cfg["output_dir"]))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -293,7 +344,7 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
     out_csv = Path(str(runtime_cfg["metrics_csv"]))
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["MPJPE", "MPJPE_norm", "APD", "ADE", "FDE", "MMADE", "MMFDE"])
+        w = csv.DictWriter(f, fieldnames=["MPJPE", "MPJPE_norm", "APD", "ADE", "FDE", "MMADE", "MMFDE", "CMD", "FID"])
         w.writeheader()
         w.writerow(metrics)
 

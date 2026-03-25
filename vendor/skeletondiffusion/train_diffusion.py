@@ -1,5 +1,6 @@
 import os
 import socket
+import math
 import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -66,6 +67,14 @@ def train(output_log_path: str,
                                             autoencoder=model,
                                             **kwargs, 
                                         )
+    es_enabled = bool(kwargs.get("early_stopping_enabled", False))
+    es_patience = max(1, int(kwargs.get("early_stopping_patience", 20)))
+    es_min_delta = float(kwargs.get("early_stopping_min_delta", 1e-4))
+    es_warmup = max(0, int(kwargs.get("early_stopping_warmup", 0)))
+    es_monitor = str(kwargs.get("early_stopping_monitor", "train_loss")).strip().lower()
+    es_best = None
+    es_bad_epochs = 0
+    last_val_loss = None
 
     def set_epoch_seed(engine: Engine):
         set_seed(seed + engine.state.epoch)
@@ -114,13 +123,57 @@ def train(output_log_path: str,
     if if_run_validation:
         @trainer.on(Events.EPOCH_COMPLETED(every=eval_frequency))
         def train_epoch_completed(engine: Engine):
+            nonlocal last_val_loss
             set_seed(0)
             random_state_manager.reseed_generator(0)
             evaluator.run(data_loader_eval)
             evaluator_train.run(data_loader_train_eval, epoch_length=num_iteration_eval)
+            val_metric = evaluator.state.metrics.get("Loss")
+            if val_metric is not None:
+                try:
+                    last_val_loss = float(val_metric)
+                except (TypeError, ValueError):
+                    last_val_loss = None
             checkpoint_handler(evaluator)
             set_seed(seed + trainer.state.epoch)
             random_state_manager.reseed_generator(seed + trainer.state.epoch)
+
+    @trainer.on(Events.EPOCH_COMPLETED)
+    def maybe_early_stop(engine: Engine):
+        nonlocal es_best, es_bad_epochs
+        if not es_enabled:
+            return
+        epoch_idx = int(engine.state.epoch)
+        if epoch_idx <= es_warmup:
+            return
+        train_metric = engine.state.metrics.get("Loss")
+        train_loss = None
+        if train_metric is not None:
+            try:
+                train_loss = float(train_metric)
+            except (TypeError, ValueError):
+                train_loss = None
+        if es_monitor == "val_loss":
+            monitored = last_val_loss
+        elif es_monitor in {"train_loss", "loss"}:
+            monitored = train_loss
+        else:
+            monitored = last_val_loss if last_val_loss is not None else train_loss
+        if monitored is None or not math.isfinite(float(monitored)):
+            return
+        monitored_f = float(monitored)
+        improved = es_best is None or monitored_f < (float(es_best) - es_min_delta)
+        if improved:
+            es_best = monitored_f
+            es_bad_epochs = 0
+            return
+        es_bad_epochs += 1
+        if es_bad_epochs >= es_patience:
+            print(
+                f"[SkeletonDiffusion][Diffusion][EarlyStop] epoch={epoch_idx} "
+                f"best={float(es_best):.6f} current={monitored_f:.6f}"
+            )
+            engine.terminate()
 
 
     trainer.run(data_loader_train,  epoch_length=num_iter_perepoch if num_iter_perepoch is not None else len(data_loader_train), max_epochs=num_epochs)   
@@ -153,6 +206,5 @@ def main(cfg: DictConfig):
 if __name__ == '__main__':
     main()
     
-
 
 

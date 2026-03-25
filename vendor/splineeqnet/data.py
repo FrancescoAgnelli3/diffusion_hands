@@ -187,6 +187,83 @@ def get_dataset_metadata(name: str) -> dict:
     return DATASET_METADATA[key]
 
 
+def resolve_twostage_hand_graph_metadata(
+    dataset: str,
+    wrist_indices: Tuple[int, ...] = tuple(),
+) -> Dict[str, Any]:
+    """
+    Build single-hand graph metadata in LOCAL indexing for twostage diffusion.
+
+    Returns:
+        {
+            "wrist_index": int,          # local wrist index in [0, node_count)
+            "links": ((i, j), ...),      # undirected unique local edges
+        }
+    """
+    meta = get_dataset_metadata(dataset)
+    base_groups: Tuple[dict, ...] = tuple(meta.get("hand_groups", ()))
+    if not base_groups:
+        raise ValueError(f"Dataset '{dataset}' does not define hand_groups metadata.")
+
+    if wrist_indices:
+        if len(wrist_indices) != len(base_groups):
+            raise ValueError(
+                f"Number of wrist indices ({len(wrist_indices)}) must match number of hand groups ({len(base_groups)})."
+            )
+        hand_groups: Tuple[dict, ...] = tuple(
+            {**group, "wrist_index": int(wrist_idx)}
+            for group, wrist_idx in zip(base_groups, wrist_indices)
+        )
+    else:
+        hand_groups = base_groups
+
+    variants: List[Tuple[int, Tuple[Tuple[int, int], ...]]] = []
+    for group in hand_groups:
+        nodes_global = [int(idx) for idx in group.get("nodes", ())]
+        if not nodes_global:
+            continue
+        g2l = {g: li for li, g in enumerate(nodes_global)}
+        wrist_global = int(group.get("wrist_index", -1))
+        if wrist_global not in g2l:
+            raise ValueError(
+                f"Wrist index {wrist_global} is not part of group nodes for dataset '{dataset}'."
+            )
+        wrist_local = int(g2l[wrist_global])
+
+        local_edges = set()
+        for pair in group.get("links", ()):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            a_global = int(pair[0])
+            b_global = int(pair[1])
+            if a_global not in g2l or b_global not in g2l:
+                continue
+            a_local = int(g2l[a_global])
+            b_local = int(g2l[b_global])
+            if a_local == b_local:
+                continue
+            if a_local > b_local:
+                a_local, b_local = b_local, a_local
+            local_edges.add((a_local, b_local))
+        variants.append((wrist_local, tuple(sorted(local_edges))))
+
+    if not variants:
+        raise ValueError(f"No usable hand graph metadata for dataset '{dataset}'.")
+
+    wrist_local_ref, links_ref = variants[0]
+    for wrist_local, links in variants[1:]:
+        if wrist_local != wrist_local_ref or links != links_ref:
+            raise ValueError(
+                "Hand groups resolve to different local topologies/wrist indices; "
+                "twostage expects a single shared local hand graph."
+            )
+
+    return {
+        "wrist_index": int(wrist_local_ref),
+        "links": tuple((int(i), int(j)) for i, j in links_ref),
+    }
+
+
 # ----------------------------
 # Outlier removal (unchanged)
 # ----------------------------

@@ -12,7 +12,7 @@ from common.metrics import (
 )
 
 
-CANONICAL_METRIC_KEYS: List[str] = ["MPJPE", "MPJPE_norm", "APD", "ADE", "FDE", "MMADE", "MMFDE"]
+CANONICAL_METRIC_KEYS: List[str] = ["MPJPE", "MPJPE_norm", "APD", "ADE", "FDE", "MMADE", "MMFDE", "CMD", "FID"]
 CANONICAL_LONG_HEADER: List[str] = [
     "timestamp",
     "dataset",
@@ -31,6 +31,8 @@ METRIC_ALIASES = {
     "FDE": ["FDE", "test_humanmac_fde_best", "validation_humanmac_fde_best"],
     "MMADE": ["MMADE", "test_humanmac_mmade_best", "validation_humanmac_mmade_best"],
     "MMFDE": ["MMFDE", "test_humanmac_mmfde_best", "validation_humanmac_mmfde_best"],
+    "CMD": ["CMD", "cmd", "humanmac_cmd", "test_humanmac_cmd_best", "validation_humanmac_cmd_best"],
+    "FID": ["FID", "fid", "humanmac_fid", "test_humanmac_fid_best", "validation_humanmac_fid_best"],
 }
 
 

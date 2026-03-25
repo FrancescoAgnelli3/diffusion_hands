@@ -51,6 +51,11 @@ class Config:
         self.num_vae_epoch_fix = cfg.get('num_vae_epoch_fix', self.num_vae_epoch)
         self.num_vae_data_sample = cfg['num_vae_data_sample']
         self.vae_model_path = os.path.join(self.model_dir , 'vae_%04d.p')
+        self.early_stopping_enabled = cfg.get('early_stopping_enabled', False)
+        self.early_stopping_patience = cfg.get('early_stopping_patience', 20)
+        self.early_stopping_min_delta = cfg.get('early_stopping_min_delta', 1e-4)
+        self.early_stopping_warmup = cfg.get('early_stopping_warmup', 0)
+        self.early_stopping_monitor = cfg.get('early_stopping_monitor', 'train_loss')
 
         # dlow
         self.nk = cfg.get('nk', 5)

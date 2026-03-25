@@ -28,9 +28,8 @@ This file assumes your project already provides:
 from __future__ import annotations
 
 import math
-from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -122,15 +121,6 @@ class TwoStageDCTDiffusionConfig:
 
     # Sampling stabilizers
     x0_clip: float = 0  # clip x0_hat in normalized space (0 disables)
-
-    # Wrist-anchored covariance knobs
-    mobility_palm_var: float = 0.15
-    mobility_depth1_var: float = 0.35
-    mobility_depth2_var: float = 0.70
-    mobility_depth3plus_var: float = 1.00
-    graph_edge_strength: float = 0.22
-    graph_two_hop_strength: float = 0.05
-    covariance_jitter: float = 1e-4
 
     @property
     def total_length(self) -> int:
@@ -612,185 +602,19 @@ class MRTimeTransformerDenoiser(nn.Module):
         v_hat = self.out(self.out_norm(x))  # (B, T_out, N, 3)
         v_hat = v_hat.reshape(B, self.t_out, self.in_feat)  # back to (B, T_out, F)
         return v_hat
-# ----------------------------- Hand covariance builder ------------------------
-
-class HandKinematicCovariance:
-    def __init__(
-        self,
-        *,
-        num_nodes: int,
-        wrist_index: int,
-        edges: Iterable[Tuple[int, int]],
-        palm_var: float,
-        depth1_var: float,
-        depth2_var: float,
-        depth3plus_var: float,
-        edge_strength: float,
-        two_hop_strength: float,
-        jitter: float,
-    ) -> None:
-        self.num_nodes = int(num_nodes)
-        self.wrist_index = int(wrist_index)
-        self.edges = [(int(i), int(j)) for i, j in edges]
-        self.palm_var = float(palm_var)
-        self.depth1_var = float(depth1_var)
-        self.depth2_var = float(depth2_var)
-        self.depth3plus_var = float(depth3plus_var)
-        self.edge_strength = float(edge_strength)
-        self.two_hop_strength = float(two_hop_strength)
-        self.jitter = float(jitter)
-
-        if not (0 <= self.wrist_index < self.num_nodes):
-            raise ValueError(f"Invalid wrist_index={self.wrist_index} for num_nodes={self.num_nodes}")
-
-        self.free_indices = [i for i in range(self.num_nodes) if i != self.wrist_index]
-        self.orig_to_free = {orig: k for k, orig in enumerate(self.free_indices)}
-        self.num_free_nodes = len(self.free_indices)
-
-    def _make_adjacency_full(self) -> List[List[int]]:
-        adj = [[] for _ in range(self.num_nodes)]
-        for i, j in self.edges:
-            if not (0 <= i < self.num_nodes and 0 <= j < self.num_nodes):
-                raise ValueError(f"Edge {(i, j)} out of bounds for num_nodes={self.num_nodes}")
-            if j not in adj[i]:
-                adj[i].append(j)
-            if i not in adj[j]:
-                adj[j].append(i)
-        return adj
-
-    def _dist_from_wrist(self) -> List[int]:
-        adj = self._make_adjacency_full()
-        dist = [-1] * self.num_nodes
-        q: deque[int] = deque([self.wrist_index])
-        dist[self.wrist_index] = 0
-        while q:
-            u = q.popleft()
-            for v in adj[u]:
-                if dist[v] < 0:
-                    dist[v] = dist[u] + 1
-                    q.append(v)
-        if any(d < 0 for d in dist):
-            raise ValueError("Hand graph is disconnected from the wrist; cannot define kinematic depth.")
-        return dist
-
-    def _node_variances_free(self) -> torch.Tensor:
-        dist = self._dist_from_wrist()
-        vars_free: List[float] = []
-        for orig_idx in self.free_indices:
-            d = dist[orig_idx]
-            if d <= 1:
-                vars_free.append(self.palm_var)
-            elif d == 2:
-                vars_free.append(self.depth1_var)
-            elif d == 3:
-                vars_free.append(self.depth2_var)
-            else:
-                vars_free.append(self.depth3plus_var)
-        return torch.tensor(vars_free, dtype=torch.float32)
-
-    def _free_graph_matrices(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        Nf = self.num_free_nodes
-        A1 = torch.zeros(Nf, Nf, dtype=torch.float32)
-        full_adj = self._make_adjacency_full()
-        for i_orig in self.free_indices:
-            i_free = self.orig_to_free[i_orig]
-            for j_orig in full_adj[i_orig]:
-                if j_orig == self.wrist_index:
-                    continue
-                j_free = self.orig_to_free[j_orig]
-                A1[i_free, j_free] = 1.0
-        A1 = torch.maximum(A1, A1.t())
-        A1.fill_diagonal_(0.0)
-        A2 = ((A1 @ A1) > 0).float()
-        A2 = A2 - A1
-        A2.fill_diagonal_(0.0)
-        A2 = torch.clamp(A2, min=0.0, max=1.0)
-        A2 = torch.maximum(A2, A2.t())
-        return A1, A2
-
-    def build_feature_covariance(self) -> torch.Tensor:
-        Nf = self.num_free_nodes
-        if Nf <= 0:
-            raise ValueError("No free joints available after removing wrist.")
-        node_vars = self._node_variances_free()
-        D_half = torch.diag(torch.sqrt(node_vars))
-        A1, A2 = self._free_graph_matrices()
-        C = torch.eye(Nf, dtype=torch.float32)
-        if self.edge_strength != 0.0:
-            C = C + self.edge_strength * A1
-        if self.two_hop_strength != 0.0:
-            C = C + self.two_hop_strength * A2
-        C = 0.5 * (C + C.t())
-        Sigma_node = D_half @ C @ D_half
-        Sigma_node = 0.5 * (Sigma_node + Sigma_node.t())
-        eigvals = torch.linalg.eigvalsh(Sigma_node)
-        min_eig = float(eigvals.min().item())
-        if min_eig <= 0.0:
-            Sigma_node = Sigma_node + (abs(min_eig) + self.jitter) * torch.eye(Nf, dtype=torch.float32)
-        else:
-            Sigma_node = Sigma_node + self.jitter * torch.eye(Nf, dtype=torch.float32)
-        tr = float(torch.trace(Sigma_node).item())
-        Sigma_node = Sigma_node * (Nf / max(tr, 1e-12))
-        Sigma_feat = torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
-        Sigma_feat = 0.5 * (Sigma_feat + Sigma_feat.t())
-        eigvals_feat = torch.linalg.eigvalsh(Sigma_feat)
-        min_eig_feat = float(eigvals_feat.min().item())
-        if min_eig_feat <= 0.0:
-            Sigma_feat = Sigma_feat + (abs(min_eig_feat) + self.jitter) * torch.eye(3 * Nf, dtype=torch.float32)
-        return Sigma_feat
-
-
-# ----------------------------- Diffusion module -------------------------------
+# ----------------------------- Diffusion module (time-domain residual, v-pred) -
 
 class TimeResidualConditionalDiffusion(nn.Module):
-    def __init__(self, cfg: TwoStageDCTDiffusionConfig, metadata: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, cfg: TwoStageDCTDiffusionConfig) -> None:
         super().__init__()
         self.cfg = cfg
         self.schedule = DiffusionSchedule(cfg.diffusion_steps, cfg.beta_schedule)
 
-        metadata = dict(metadata or {})
-        if "wrist_index" not in metadata:
-            raise ValueError(
-                "Missing required metadata['wrist_index']; refusing to infer wrist index."
-            )
-        self.wrist_index = int(metadata["wrist_index"])
-        edges_raw = metadata.get("edges", ())
-        self.edges = [(int(i), int(j)) for i, j in edges_raw] if edges_raw else []
-
-        if not (0 <= self.wrist_index < cfg.num_nodes):
-            raise ValueError(
-                f"Invalid wrist_index={self.wrist_index} for num_nodes={cfg.num_nodes}"
-            )
-        self.free_indices = [i for i in range(cfg.num_nodes) if i != self.wrist_index]
-        self.num_free_nodes = len(self.free_indices)
-        self.free_feature_dim = 3 * self.num_free_nodes
-
-        if self.edges and self.num_free_nodes > 0:
-            cov_builder = HandKinematicCovariance(
-                num_nodes=cfg.num_nodes,
-                wrist_index=self.wrist_index,
-                edges=self.edges,
-                palm_var=cfg.mobility_palm_var,
-                depth1_var=cfg.mobility_depth1_var,
-                depth2_var=cfg.mobility_depth2_var,
-                depth3plus_var=cfg.mobility_depth3plus_var,
-                edge_strength=cfg.graph_edge_strength,
-                two_hop_strength=cfg.graph_two_hop_strength,
-                jitter=cfg.covariance_jitter,
-            )
-            cov = cov_builder.build_feature_covariance()
-        else:
-            cov = torch.eye(self.free_feature_dim, dtype=torch.float32)
-
-        chol = torch.linalg.cholesky(cov)
-        inv_chol = torch.inverse(chol)
-        self.register_buffer("cov_base", cov.to(torch.float32), persistent=True)
-        self.register_buffer("cov_base_chol", chol.to(torch.float32), persistent=True)
-        self.register_buffer("cov_base_inv_chol", inv_chol.to(torch.float32), persistent=True)
+        # Keep EMA in fp32 for numerical stability
         self.register_buffer("ema_rms", torch.tensor(1.0, dtype=torch.float32))
 
         self.denoiser = MRTimeTransformerDenoiser(
-            in_feat=self.free_feature_dim,
+            in_feat=cfg.feature_dim,
             t_in=cfg.input_length,
             t_out=cfg.pred_length,
             d_model=cfg.denoiser_dim,
@@ -800,22 +624,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
             cond_use_history=cfg.cond_use_history,
             cond_use_coarse=cfg.cond_use_coarse,
         )
-
-    def _select_free_joints(self, x: torch.Tensor, T: int, name: str) -> torch.Tensor:
-        _assert_shape(x, (None, T, self.cfg.num_nodes, 3), name)
-        return x[:, :, self.free_indices, :]
-
-    def _flatten_free(self, x: torch.Tensor, T: int, name: str) -> torch.Tensor:
-        x_free = self._select_free_joints(x, T, name)
-        return x_free.reshape(x_free.size(0), T, -1)
-
-    def _restore_full_from_free(self, x_free_flat: torch.Tensor, T: int, dtype: torch.dtype) -> torch.Tensor:
-        B = x_free_flat.size(0)
-        _assert_shape(x_free_flat, (B, T, self.free_feature_dim), "x_free_flat")
-        x_free = x_free_flat.reshape(B, T, self.num_free_nodes, 3)
-        full = torch.zeros(B, T, self.cfg.num_nodes, 3, device=x_free.device, dtype=dtype)
-        full[:, :, self.free_indices, :] = x_free
-        return full
 
     def _schedule_tensors(
         self, device: torch.device, dtype: torch.dtype
@@ -827,161 +635,196 @@ class TimeResidualConditionalDiffusion(nn.Module):
         )
 
     def _residual_scale(self, residual_gt: torch.Tensor) -> torch.Tensor:
+        """
+        Returns scalar s (fp32) on residual_gt.device.
+        Updates EMA during training using detached residual RMS.
+        """
         eps = float(self.cfg.residual_rms_eps)
         decay = float(self.cfg.residual_ema_decay)
-        batch_rms = residual_gt.detach().float().pow(2).mean().sqrt()
+
+        batch_rms = residual_gt.detach().float().pow(2).mean().sqrt()  # fp32 scalar on device
         if self.training:
             self.ema_rms.mul_(decay).add_(
                 batch_rms.to(device=self.ema_rms.device, dtype=self.ema_rms.dtype),
                 alpha=1.0 - decay,
             )
-        s = torch.clamp(self.ema_rms.to(device=residual_gt.device), min=eps)
+
+        s = torch.clamp(self.ema_rms.to(device=residual_gt.device), min=eps)  # fp32
         return s
 
     def training_loss(
         self,
         *,
-        residual_gt: torch.Tensor,
-        history_full: torch.Tensor,
-        coarse_future_full: torch.Tensor,
+        residual_gt: torch.Tensor,       # (B, T_out, F) in data units
+        history_flat: torch.Tensor,      # (B, T_in, F)
+        coarse_future_flat: torch.Tensor, # (B, T_out, F)
         mamp_feat: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B = residual_gt.size(0)
-        _assert_shape(residual_gt, (B, self.cfg.pred_length, self.cfg.num_nodes, 3), "residual_gt")
-        _assert_shape(history_full, (B, self.cfg.input_length, self.cfg.num_nodes, 3), "history_full")
-        _assert_shape(coarse_future_full, (B, self.cfg.pred_length, self.cfg.num_nodes, 3), "coarse_future_full")
+        _assert_shape(residual_gt, (B, self.cfg.pred_length, self.cfg.feature_dim), "residual_gt")
 
-        residual_gt_free = self._flatten_free(residual_gt, self.cfg.pred_length, "residual_gt")
-        history_free = self._flatten_free(history_full, self.cfg.input_length, "history_full")
-        coarse_free = self._flatten_free(coarse_future_full, self.cfg.pred_length, "coarse_future_full")
+        # Normalize residual: x0 = r / s  (work in fp32 for stability)
+        s = self._residual_scale(residual_gt)  # fp32 scalar
+        x0 = residual_gt.float() / s
 
-        s = self._residual_scale(residual_gt_free)
-        x0 = residual_gt_free.float() / s
-        device = residual_gt_free.device
-        _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._schedule_tensors(device, x0.dtype)
+        device = residual_gt.device
+        alpha_bars, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._schedule_tensors(device, x0.dtype)
 
         t = torch.randint(0, self.cfg.diffusion_steps, (B,), device=device, dtype=torch.long)
         eps = torch.randn_like(x0)
-        chol = self.cov_base_chol.to(device=device, dtype=x0.dtype)
-        inv_chol = self.cov_base_inv_chol.to(device=device, dtype=x0.dtype)
-        eta = torch.matmul(eps, chol.t())
+
         sqrt_ab = sqrt_alpha_bars[t].view(B, 1, 1)
         sqrt_omb = sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
-        x_t = sqrt_ab * x0 + sqrt_omb * eta
-        v = sqrt_ab * eta - sqrt_omb * x0
+
+        x_t = sqrt_ab * x0 + sqrt_omb * eps
+
+        # v target: v = sqrt(ab)*eps - sqrt(1-ab)*x0
+        v = sqrt_ab * eps - sqrt_omb * x0
 
         v_hat = self.denoiser(
-            x_t.to(dtype=history_free.dtype),
+            x_t.to(dtype=history_flat.dtype),
             t,
-            history_free,
-            coarse_free,
+            history_flat,
+            coarse_future_flat,
             mamp_feat=mamp_feat,
         ).float()
-
-        err = v_hat - v
-        err_w = torch.matmul(err, inv_chol.t())
-        return torch.mean(err_w ** 2)
+        return torch.mean((v - v_hat) ** 2)
 
     @torch.no_grad()
     def sample_ddim(
         self,
         *,
-        history_full: torch.Tensor,
-        coarse_future_full: torch.Tensor,
+        history_flat: torch.Tensor,       # (B, T_in, F)
+        coarse_future_flat: torch.Tensor, # (B, T_out, F)
         mamp_feat: Optional[torch.Tensor] = None,
         seed: int = 0,
         steps: Optional[int] = None,
         eta: float = 0.0,
         return_score: bool = False,
     ) -> torch.Tensor:
+        """
+        DDIM sampling for residual sequence in data units.
+
+        Sampling is done in normalized space; final output is multiplied by s.
+        """
         if steps is None:
             steps = self.cfg.ddim_steps
         steps = int(steps)
         if steps <= 0:
             raise ValueError("DDIM steps must be positive")
 
-        B = history_full.size(0)
-        device = history_full.device
-        _assert_shape(history_full, (B, self.cfg.input_length, self.cfg.num_nodes, 3), "history_full")
-        _assert_shape(coarse_future_full, (B, self.cfg.pred_length, self.cfg.num_nodes, 3), "coarse_future_full")
-
-        history_free = self._flatten_free(history_full, self.cfg.input_length, "history_full")
-        coarse_free = self._flatten_free(coarse_future_full, self.cfg.pred_length, "coarse_future_full")
-
+        B = history_flat.size(0)
+        device = history_flat.device
         gen = torch.Generator(device=device)
         gen.manual_seed(int(seed))
-        s = torch.clamp(self.ema_rms.to(device=device), min=float(self.cfg.residual_rms_eps))
+
+        # Use EMA scale (fp32) without updating
+        s = torch.clamp(self.ema_rms.to(device=device), min=float(self.cfg.residual_rms_eps))  # fp32 scalar
+
+        # Sample in normalized space (fp32 core)
         x = torch.randn(
-            (B, self.cfg.pred_length, self.free_feature_dim),
+            (B, self.cfg.pred_length, self.cfg.feature_dim),
             device=device,
             dtype=torch.float32,
             generator=gen,
         )
-        x = torch.matmul(x, self.cov_base_chol.to(device=device, dtype=x.dtype).t())
 
         T = self.cfg.diffusion_steps
-        t_seq = _make_ddim_timesteps(T, steps, device=device)
+        t_seq = _make_ddim_timesteps(T, steps, device=device)  # descending unique ints
+
+        t_max = int(1 * (T - 1))  # try 0.4–0.8
+        t_seq = t_seq[t_seq <= t_max]
+        if t_seq.numel() == 0 or int(t_seq[-1]) != 0:
+            t_seq = torch.cat([t_seq, torch.tensor([0], device=device, dtype=torch.long)])
+
         alpha_bars, _, _ = self._schedule_tensors(device, x.dtype)
+
         clip = float(self.cfg.x0_clip)
+
         score = torch.zeros(B, device=device, dtype=torch.float32) if return_score else None
 
         for idx in range(t_seq.numel()):
-            t_int = int(t_seq[idx].item())
-            t_batch = torch.full((B,), t_int, device=device, dtype=torch.long)
-            ab_t = alpha_bars[t_int]
+            t = int(t_seq[idx].item())
+            t_batch = torch.full((B,), t, device=device, dtype=torch.long)
+
+            ab_t = alpha_bars[t]  # scalar
             sqrt_ab_t = torch.sqrt(ab_t)
             sqrt_omb_t = torch.sqrt(1.0 - ab_t)
 
+            # Predict v (network runs in its dtype; cast to fp32 for math)
             v_hat = self.denoiser(
-                x.to(dtype=history_free.dtype),
+                x.to(dtype=history_flat.dtype),
                 t_batch,
-                history_free,
-                coarse_free,
+                history_flat,
+                coarse_future_flat,
                 mamp_feat=mamp_feat,
             ).float()
 
+            # Reconstruct x0 from v-pred (stable; no division by sqrt_ab_t)
             x0 = sqrt_ab_t * x - sqrt_omb_t * v_hat
+
             if clip > 0.0:
                 x0 = torch.clamp(x0, -clip, clip)
-            eta_hat = sqrt_omb_t * x + sqrt_ab_t * v_hat
+
+            # Need eps_hat for DDIM direction
+            eps_hat = (x - sqrt_ab_t * x0) / (sqrt_omb_t + 1e-12)
             if score is not None:
-                score = score + eta_hat.float().pow(2).sum(dim=(1, 2))
+                score = score + eps_hat.float().pow(2).sum(dim=(1, 2))
 
             if idx == t_seq.numel() - 1:
                 ab_prev = torch.tensor(1.0, device=device, dtype=x.dtype)
             else:
                 t_prev = int(t_seq[idx + 1].item())
                 ab_prev = alpha_bars[t_prev]
+
             sqrt_ab_prev = torch.sqrt(ab_prev)
             sqrt_omb_prev = torch.sqrt(1.0 - ab_prev)
 
             if eta != 0.0:
+                # DDIM with noise
                 sigma = eta * torch.sqrt((1 - ab_prev) / (1 - ab_t) * (1 - ab_t / ab_prev))
-                dir_coeff = torch.sqrt(torch.clamp(sqrt_omb_prev**2 - sigma**2, min=0.0))
-                noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=gen)
-                noise = torch.matmul(noise, self.cov_base_chol.to(device=device, dtype=x.dtype).t())
-                x = sqrt_ab_prev * x0 + dir_coeff * eta_hat + sigma * noise
+                noise = torch.randn(
+                    x.shape,
+                    device=x.device,
+                    dtype=x.dtype,
+                    generator=gen,
+                )
+                x = (
+                    sqrt_ab_prev * x0
+                    + torch.sqrt(torch.clamp(sqrt_omb_prev**2 - sigma**2, min=0.0)) * eps_hat
+                    + sigma * noise
+                )
             else:
-                x = sqrt_ab_prev * x0 + sqrt_omb_prev * eta_hat
+                # Deterministic DDIM
+                x = sqrt_ab_prev * x0 + sqrt_omb_prev * eps_hat
 
-        out_free = (x * s).to(dtype=history_full.dtype)
-        out_full = self._restore_full_from_free(out_free, self.cfg.pred_length, history_full.dtype)
+        # Denormalize once at end; return in the caller's expected dtype
+        out = (x * s).to(dtype=history_flat.dtype)
         if score is None:
-            return out_full
-        return out_full, score
-
+            return out
+        return out, score
 
 # ----------------------------- Wrapper model ----------------------------------
 
 class TwoStageDCTDiffusionForecaster(nn.Module):
-    def __init__(self, cfg: TwoStageDCTDiffusionConfig, metadata: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, cfg: TwoStageDCTDiffusionConfig) -> None:
         super().__init__()
         self.cfg = cfg
+
         self.coarse = CoarseDCTForecaster(cfg)
-        self.diffusion = TimeResidualConditionalDiffusion(cfg, metadata=metadata)
+        self.diffusion = TimeResidualConditionalDiffusion(cfg)
+
         if cfg.freeze_coarse:
             for p in self.coarse.parameters():
                 p.requires_grad = False
+
+    def _flat_history(self, history: torch.Tensor) -> torch.Tensor:
+        _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
+        return history.reshape(history.size(0), self.cfg.input_length, -1)
+
+    def _flat_future(self, future: torch.Tensor) -> torch.Tensor:
+        _assert_shape(future, (None, self.cfg.pred_length, self.cfg.num_nodes, 3), "future")
+        return future.reshape(future.size(0), self.cfg.pred_length, -1)
 
     def diffusion_loss(
         self,
@@ -990,24 +833,31 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
         mamp_feat: Optional[torch.Tensor] = None,
         coarse_future: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
-        _assert_shape(future_gt, (None, self.cfg.pred_length, self.cfg.num_nodes, 3), "future_gt")
+        """
+        Compute diffusion training loss (v-pred in normalized residual space) and return coarse prediction for logging.
+        Signature unchanged for your training code.
+        """
+        history_flat = self._flat_history(history)
 
         if coarse_future is None:
-            coarse_future = self.coarse(history)
+            coarse_future = self.coarse(history)  # (B, T_out, N, 3)
         else:
             _assert_shape(
                 coarse_future,
                 (history.size(0), self.cfg.pred_length, self.cfg.num_nodes, 3),
                 "coarse_future",
             )
-        coarse_cond = coarse_future.detach() if self.cfg.stopgrad_coarse_condition else coarse_future
-        residual_gt = future_gt - coarse_future.detach()
+        coarse_future_flat = coarse_future.reshape(history.size(0), self.cfg.pred_length, -1)
+
+        coarse_cond = coarse_future_flat.detach() if self.cfg.stopgrad_coarse_condition else coarse_future_flat
+
+        future_gt_flat = self._flat_future(future_gt)
+        residual_gt = future_gt_flat - coarse_future_flat.detach()
 
         loss = self.diffusion.training_loss(
             residual_gt=residual_gt,
-            history_full=history,
-            coarse_future_full=coarse_cond,
+            history_flat=history_flat,
+            coarse_future_flat=coarse_cond,
             mamp_feat=mamp_feat,
         )
         return loss, coarse_future
@@ -1022,7 +872,9 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
         seed: int = 0,
         return_score: bool = False,
     ) -> torch.Tensor:
-        _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
+        """Full two-stage prediction (single reconstruction)."""
+        history_flat = self._flat_history(history)
+
         if coarse_future is None:
             coarse_future = self.coarse(history)
         else:
@@ -1031,11 +883,12 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
                 (history.size(0), self.cfg.pred_length, self.cfg.num_nodes, 3),
                 "coarse_future",
             )
+        coarse_future_flat = coarse_future.reshape(history.size(0), self.cfg.pred_length, -1)
+        coarse_cond = coarse_future_flat.detach() if self.cfg.stopgrad_coarse_condition else coarse_future_flat
 
-        coarse_cond = coarse_future.detach() if self.cfg.stopgrad_coarse_condition else coarse_future
         residual_pred = self.diffusion.sample_ddim(
-            history_full=history,
-            coarse_future_full=coarse_cond,
+            history_flat=history_flat,
+            coarse_future_flat=coarse_cond,
             mamp_feat=mamp_feat,
             seed=seed,
             steps=self.cfg.ddim_steps,
@@ -1045,9 +898,8 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
 
         if return_score:
             residual_pred, score = residual_pred
-        future = coarse_future + residual_pred
-        if 0 <= int(self.diffusion.wrist_index) < self.cfg.num_nodes:
-            future[:, :, int(self.diffusion.wrist_index), :] = 0.0
+        future_flat = coarse_future_flat + residual_pred
+        future = future_flat.reshape(history.size(0), self.cfg.pred_length, self.cfg.num_nodes, 3)
         if return_score:
             return future, score
         return future

@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.evaluation import (
+    CANONICAL_METRIC_KEYS,
     CANONICAL_LONG_HEADER,
     normalize_metrics_dict,
     read_one_row_csv,
@@ -124,11 +125,22 @@ def _resolve_models_config(cfg: dict, config_path: Path) -> dict:
 def _append_long_csv(path: Path, row: Dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     header = CANONICAL_LONG_HEADER
+    if path.exists():
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            existing_header = list(reader.fieldnames or [])
+            if existing_header != header:
+                existing_rows = list(reader)
+                with open(path, "w", newline="", encoding="utf-8") as wf:
+                    ww = csv.DictWriter(wf, fieldnames=header)
+                    ww.writeheader()
+                    for old_row in existing_rows:
+                        ww.writerow({k: old_row.get(k, "") for k in header})
     write_header = not path.exists()
     serialized: Dict[str, object] = {}
     for k in header:
         v = row.get(k, "")
-        if k in {"MPJPE", "MPJPE_norm", "APD", "ADE", "FDE", "MMADE", "MMFDE"} and isinstance(v, (int, float)):
+        if k in {"MPJPE", "MPJPE_norm", "APD", "ADE", "FDE", "MMADE", "MMFDE", "CMD", "FID"} and isinstance(v, (int, float)):
             serialized[k] = f"{float(v):.3f}"
         else:
             serialized[k] = v
@@ -254,6 +266,18 @@ def run_twostage(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
     epochs = mcfg.get("train", {}).get("epochs")
     if epochs is not None:
         best_cfg["epochs"] = int(epochs)
+    es_cfg = _as_dict(_as_dict(mcfg.get("train")).get("early_stopping"))
+    if es_cfg:
+        if "enabled" in es_cfg:
+            best_cfg["early_stopping_enabled"] = bool(es_cfg.get("enabled"))
+        if "patience" in es_cfg:
+            best_cfg["early_stopping_patience"] = int(es_cfg.get("patience"))
+        if "min_delta" in es_cfg:
+            best_cfg["early_stopping_min_delta"] = float(es_cfg.get("min_delta"))
+        if "warmup" in es_cfg:
+            best_cfg["early_stopping_warmup"] = int(es_cfg.get("warmup"))
+        if "monitor" in es_cfg:
+            best_cfg["early_stopping_monitor"] = str(es_cfg.get("monitor"))
 
     best_json = run_root / "twostage_best_config.json"
     out_eval_base = run_root / "twostage_eval.csv"
@@ -330,6 +354,19 @@ def run_belfusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, r
     if train_epochs is not None:
         template.setdefault("train", {})
         template["train"]["epochs"] = int(train_epochs)
+    es_cfg = _as_dict(_as_dict(mcfg.get("train")).get("early_stopping"))
+    if es_cfg:
+        template.setdefault("train", {})
+        if "enabled" in es_cfg:
+            template["train"]["early_stopping_enabled"] = bool(es_cfg.get("enabled"))
+        if "patience" in es_cfg:
+            template["train"]["early_stopping_patience"] = int(es_cfg.get("patience"))
+        if "min_delta" in es_cfg:
+            template["train"]["early_stopping_min_delta"] = float(es_cfg.get("min_delta"))
+        if "warmup" in es_cfg:
+            template["train"]["early_stopping_warmup"] = int(es_cfg.get("warmup"))
+        if "monitor" in es_cfg:
+            template["train"]["early_stopping_monitor"] = str(es_cfg.get("monitor"))
 
     template.setdefault("eval", {})
     template["eval"]["num_candidates"] = int(cfg["num_candidates"])
@@ -395,6 +432,19 @@ def run_comusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
         tepoch = int(train_epochs)
         template["learn_specs"]["train_epoch"] = tepoch
         template["learn_specs"]["num_epoch_fix_lr"] = min(tepoch, int(template["learn_specs"].get("num_epoch_fix_lr", tepoch)))
+    es_cfg = _as_dict(_as_dict(mcfg.get("train")).get("early_stopping"))
+    if es_cfg:
+        template.setdefault("learn_specs", {})
+        if "enabled" in es_cfg:
+            template["learn_specs"]["early_stopping_enabled"] = bool(es_cfg.get("enabled"))
+        if "patience" in es_cfg:
+            template["learn_specs"]["early_stopping_patience"] = int(es_cfg.get("patience"))
+        if "min_delta" in es_cfg:
+            template["learn_specs"]["early_stopping_min_delta"] = float(es_cfg.get("min_delta"))
+        if "warmup" in es_cfg:
+            template["learn_specs"]["early_stopping_warmup"] = int(es_cfg.get("warmup"))
+        if "monitor" in es_cfg:
+            template["learn_specs"]["early_stopping_monitor"] = str(es_cfg.get("monitor"))
     template["logging_specs"]["model_id"] = cfg_id
     template["logging_specs"]["model_path"] = f"./results/{cfg_id}"
     _dump_yaml(cfg_path, template)
@@ -453,6 +503,18 @@ def run_dlow_cvae(dataset: str, data_dir: Path, action_filter: str, cfg: dict, r
         vae_epoch = int(train_epochs)
         template["num_vae_epoch"] = vae_epoch
         template["num_vae_epoch_fix"] = min(vae_epoch, int(template.get("num_vae_epoch_fix", vae_epoch)))
+    es_cfg = _as_dict(_as_dict(mcfg.get("train")).get("early_stopping"))
+    if es_cfg:
+        if "enabled" in es_cfg:
+            template["early_stopping_enabled"] = bool(es_cfg.get("enabled"))
+        if "patience" in es_cfg:
+            template["early_stopping_patience"] = int(es_cfg.get("patience"))
+        if "min_delta" in es_cfg:
+            template["early_stopping_min_delta"] = float(es_cfg.get("min_delta"))
+        if "warmup" in es_cfg:
+            template["early_stopping_warmup"] = int(es_cfg.get("warmup"))
+        if "monitor" in es_cfg:
+            template["early_stopping_monitor"] = str(es_cfg.get("monitor"))
     save_interval = mcfg.get("train", {}).get("save_model_interval")
     if save_interval is not None:
         template["save_model_interval"] = int(save_interval)
@@ -524,9 +586,27 @@ def run_humanmac(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
     train_epochs = mcfg.get("train", {}).get("epochs")
     if train_epochs is not None:
         template["num_epoch"] = int(train_epochs)
+    es_cfg = _as_dict(_as_dict(mcfg.get("train")).get("early_stopping"))
+    if es_cfg:
+        if "enabled" in es_cfg:
+            template["early_stopping_enabled"] = bool(es_cfg.get("enabled"))
+        if "patience" in es_cfg:
+            template["early_stopping_patience"] = int(es_cfg.get("patience"))
+        if "min_delta" in es_cfg:
+            template["early_stopping_min_delta"] = float(es_cfg.get("min_delta"))
+        if "warmup" in es_cfg:
+            template["early_stopping_warmup"] = int(es_cfg.get("warmup"))
+        if "monitor" in es_cfg:
+            template["early_stopping_monitor"] = str(es_cfg.get("monitor"))
     _dump_yaml(cfg_path, template)
 
     num_epoch = int(template.get("num_epoch", 200))
+    es_enabled = bool(es_cfg.get("enabled", False)) if es_cfg else False
+    es_patience = int(es_cfg.get("patience", 20)) if es_cfg else 20
+    es_min_delta = float(es_cfg.get("min_delta", 1e-4)) if es_cfg else 1e-4
+    es_warmup = int(es_cfg.get("warmup", 0)) if es_cfg else 0
+    es_monitor = str(es_cfg.get("monitor", "train_loss")) if es_cfg else "train_loss"
+    validate_last_only = False if (es_enabled and es_monitor.strip().lower() == "val_loss") else True
     rc = _run(
         [
             PYTHON,
@@ -553,6 +633,18 @@ def run_humanmac(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
             "0",
             "--save_metrics_interval",
             "1",
+            "--validate_last_epoch_only",
+            "false" if not validate_last_only else "true",
+            "--early_stopping_enabled",
+            "true" if es_enabled else "false",
+            "--early_stopping_patience",
+            str(es_patience),
+            "--early_stopping_min_delta",
+            str(es_min_delta),
+            "--early_stopping_warmup",
+            str(es_warmup),
+            "--early_stopping_monitor",
+            str(es_monitor),
         ],
         cwd=wd,
     )
@@ -619,6 +711,8 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
     diff_epochs = diff_cfg.get("epochs")
     diff_iters = diff_cfg.get("iter_per_epoch")
     diff_model = str(diff_cfg.get("model", "skeleton_diffusion"))
+    auto_es_cfg = _as_dict(auto_cfg.get("early_stopping"))
+    diff_es_cfg = _as_dict(diff_cfg.get("early_stopping"))
     fps = int(_as_dict(auto_defaults.get("dataset")).get("fps", 10))
     hist_sec = float(pp["input_n"]) / float(fps)
     pred_sec = float(pp["output_n"]) / float(fps)
@@ -661,6 +755,11 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
             f"output_log_path={autoenc_out}",
             *(["model.num_epochs=%d" % int(auto_epochs)] if auto_epochs is not None else []),
             *(["model.num_iter_perepoch=%d" % int(auto_iters)] if auto_iters is not None else []),
+            *(["model.early_stopping_enabled=%s" % ("true" if bool(auto_es_cfg.get("enabled", False)) else "false")] if auto_es_cfg else []),
+            *(["model.early_stopping_patience=%d" % int(auto_es_cfg.get("patience", 20))] if auto_es_cfg else []),
+            *(["model.early_stopping_min_delta=%s" % float(auto_es_cfg.get("min_delta", 1e-4))] if auto_es_cfg else []),
+            *(["model.early_stopping_warmup=%d" % int(auto_es_cfg.get("warmup", 0))] if auto_es_cfg else []),
+            *(["model.early_stopping_monitor=%s" % str(auto_es_cfg.get("monitor", "train_loss"))] if auto_es_cfg else []),
         ]
     )
     rc = _run(auto_cmd, cwd=wd)
@@ -684,6 +783,11 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
             f"output_log_path={diff_out}",
             *(["model.num_epochs=%d" % int(diff_epochs)] if diff_epochs is not None else []),
             *(["model.num_iter_perepoch=%d" % int(diff_iters)] if diff_iters is not None else []),
+            *(["model.early_stopping_enabled=%s" % ("true" if bool(diff_es_cfg.get("enabled", False)) else "false")] if diff_es_cfg else []),
+            *(["model.early_stopping_patience=%d" % int(diff_es_cfg.get("patience", 20))] if diff_es_cfg else []),
+            *(["model.early_stopping_min_delta=%s" % float(diff_es_cfg.get("min_delta", 1e-4))] if diff_es_cfg else []),
+            *(["model.early_stopping_warmup=%d" % int(diff_es_cfg.get("warmup", 0))] if diff_es_cfg else []),
+            *(["model.early_stopping_monitor=%s" % str(diff_es_cfg.get("monitor", "train_loss"))] if diff_es_cfg else []),
         ]
     )
     rc = _run(diff_cmd, cwd=wd)
@@ -708,19 +812,25 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
             "dataset_split=test",
             "assembly_split_strategy=test",
             f"assembly_dataset_name={dataset}",
+            f"dataset.assembly_dataset_name={dataset}",
             f"checkpoint_path={diff_ckpt}",
             "if_use_splineeqnet_assembly_pipeline=True",
             f"assembly_splineeqnet_root={VENDOR / 'splineeqnet'}",
+            f"dataset.assembly_splineeqnet_root={VENDOR / 'splineeqnet'}",
             f"assembly_data_dir={data_dir}",
+            f"dataset.assembly_data_dir={data_dir}",
             f"assembly_action_filter={action_filter}",
-            f"assembly_wrist_indices={wrist_indices_hydra}",
+            f"dataset.assembly_action_filter={action_filter}",
+            f"dataset.assembly_wrist_indices={wrist_indices_hydra}",
             f"task.history_sec={hist_sec}",
             f"task.prediction_horizon_sec={pred_sec}",
             f"obs_length={int(pp['input_n'])}",
             f"pred_length={int(pp['output_n'])}",
             f"assembly_stride={int(pp['stride'])}",
             f"assembly_time_interp={time_interp_val}",
+            f"dataset.assembly_time_interp={time_interp_val}",
             f"assembly_window_norm={window_norm_val}",
+            f"dataset.assembly_window_norm={window_norm_val}",
             f"assembly_eval_batch_mult={int(pp['eval_batch_mult'])}",
             f"num_samples={cfg['num_candidates']}",
             f"assembly_mpjpe_best_of_k={cfg['num_candidates']}",
@@ -739,6 +849,87 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
     with open(eval_yamls[-1], "r", encoding="utf-8") as f:
         row = yaml.safe_load(f)
     return normalize_metrics_dict({k: float(v) for k, v in row.items() if isinstance(v, (int, float))})
+
+
+def run_gsps(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+    wd = VENDOR / "gsps"
+    mcfg = cfg.get("models", {}).get("gsps", {})
+    pp = _as_dict(cfg.get("_shared_preprocessing"))
+    template = deepcopy(_as_dict(mcfg.get("defaults")))
+    if not template:
+        raise RuntimeError("Missing models.gsps.defaults in experiment model YAML.")
+
+    template["seed"] = int(cfg["seed"])
+    template["gpu_index"] = int(cfg["gpu_index"])
+    template["dataset"] = str(dataset).lower()
+    template["data_dir"] = str(data_dir)
+    template["action_filter"] = str(action_filter)
+    template["splineeqnet_root"] = str(VENDOR / "splineeqnet")
+
+    template.setdefault("preprocessing", {})
+    template["preprocessing"]["input_n"] = int(pp["input_n"])
+    template["preprocessing"]["output_n"] = int(pp["output_n"])
+    template["preprocessing"]["stride"] = int(pp["stride"])
+    template["preprocessing"]["time_interp"] = pp.get("time_interp")
+    template["preprocessing"]["window_norm"] = pp.get("window_norm")
+    template["preprocessing"]["eval_batch_mult"] = int(pp["eval_batch_mult"])
+
+    template.setdefault("model", {})
+    template["model"]["nk"] = int(cfg["num_candidates"])
+    train_epochs = mcfg.get("train", {}).get("epochs")
+    if train_epochs is not None:
+        template.setdefault("train", {})
+        template["train"]["epochs"] = int(train_epochs)
+    train_batch = mcfg.get("train", {}).get("batch_size")
+    if train_batch is not None:
+        template.setdefault("train", {})
+        template["train"]["batch_size"] = int(train_batch)
+    train_es_cfg = _as_dict(_as_dict(mcfg.get("train")).get("early_stopping"))
+    if train_es_cfg:
+        template.setdefault("train", {})
+        if "enabled" in train_es_cfg:
+            template["train"]["early_stopping_enabled"] = bool(train_es_cfg.get("enabled"))
+        if "patience" in train_es_cfg:
+            template["train"]["early_stopping_patience"] = int(train_es_cfg.get("patience"))
+        if "min_delta" in train_es_cfg:
+            template["train"]["early_stopping_min_delta"] = float(train_es_cfg.get("min_delta"))
+        if "warmup" in train_es_cfg:
+            template["train"]["early_stopping_warmup"] = int(train_es_cfg.get("warmup"))
+        if "monitor" in train_es_cfg:
+            template["train"]["early_stopping_monitor"] = str(train_es_cfg.get("monitor"))
+    prior_es_cfg = _as_dict(_as_dict(mcfg.get("prior")).get("early_stopping"))
+    if prior_es_cfg:
+        template.setdefault("prior", {})
+        if "enabled" in prior_es_cfg:
+            template["prior"]["early_stopping_enabled"] = bool(prior_es_cfg.get("enabled"))
+        if "patience" in prior_es_cfg:
+            template["prior"]["early_stopping_patience"] = int(prior_es_cfg.get("patience"))
+        if "min_delta" in prior_es_cfg:
+            template["prior"]["early_stopping_min_delta"] = float(prior_es_cfg.get("min_delta"))
+        if "warmup" in prior_es_cfg:
+            template["prior"]["early_stopping_warmup"] = int(prior_es_cfg.get("warmup"))
+        if "monitor" in prior_es_cfg:
+            template["prior"]["early_stopping_monitor"] = str(prior_es_cfg.get("monitor"))
+
+    template.setdefault("eval", {})
+    template["eval"]["multimodal_threshold"] = float(cfg["humanmac_multimodal_threshold"])
+
+    with tempfile.TemporaryDirectory(prefix="gsps_") as td:
+        td_path = Path(td)
+        cfg_path = td_path / "gsps.yaml"
+        out_root = td_path / "out"
+        out_eval = out_root / "eval_stats.csv"
+        template.setdefault("runtime", {})
+        template["runtime"]["output_dir"] = str(out_root)
+        template["runtime"]["metrics_csv"] = str(out_eval)
+        _dump_yaml(cfg_path, template)
+
+        rc = _run([PYTHON, "run_gsps.py", "--config", str(cfg_path)], cwd=wd)
+        if rc != 0:
+            raise RuntimeError("GSPS run failed")
+
+        row = read_one_row_csv(out_eval)
+        return normalize_metrics_dict(row)
 
 
 def _resolve_datasets(cfg: dict) -> List[str]:
@@ -802,6 +993,7 @@ def main() -> None:
         ("dlow_cvae", run_dlow_cvae),
         ("humanmac", run_humanmac),
         ("skeletondiffusion", run_skeletondiffusion),
+        ("gsps", run_gsps),
     ]
     for dataset in datasets:
         configured_action_filter = str(cfg.get("action_filter", ""))
@@ -822,12 +1014,10 @@ def main() -> None:
                 "model": model_name,
                 "status": "ok",
                 "notes": "",
+                **{k: float("nan") for k in CANONICAL_METRIC_KEYS},
             }
             try:
-                if model_name in {"twostage_dct_diffusion", "belfusion", "comusion", "dlow_cvae", "humanmac", "skeletondiffusion"}:
-                    metrics = fn(dataset, data_dir, action_filter, cfg, run_id)
-                else:
-                    metrics = fn(data_dir, action_filter, cfg, run_id)
+                metrics = fn(dataset, data_dir, action_filter, cfg, run_id)
                 row.update(metrics)
                 print(f"[{dataset}:{model_name}] metrics={metrics}")
             except Exception as exc:

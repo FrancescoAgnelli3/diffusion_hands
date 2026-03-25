@@ -56,6 +56,8 @@ def _write_results_csv(results_csv: str, rows: list[Dict[str, object]]) -> None:
         "test_humanmac_fde_best",
         "test_humanmac_mmade_best",
         "test_humanmac_mmfde_best",
+        "test_humanmac_cmd_best",
+        "test_humanmac_fid_best",
     ]
     with open(results_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -210,6 +212,8 @@ def main() -> Dict[str, Dict[str, object]]:
             test_humanmac_fde = metrics.get("test_humanmac_fde_best", metrics.get("validation_humanmac_fde_best"))
             test_humanmac_mmade = metrics.get("test_humanmac_mmade_best", metrics.get("validation_humanmac_mmade_best"))
             test_humanmac_mmfde = metrics.get("test_humanmac_mmfde_best", metrics.get("validation_humanmac_mmfde_best"))
+            test_humanmac_cmd = metrics.get("test_humanmac_cmd_best", metrics.get("validation_humanmac_cmd_best"))
+            test_humanmac_fid = metrics.get("test_humanmac_fid_best", metrics.get("validation_humanmac_fid_best"))
             model_result = {
                 "model": model_name,
                 "dataset": ds_cfg.dataset,
@@ -227,6 +231,8 @@ def main() -> Dict[str, Dict[str, object]]:
                 "test_humanmac_fde_best": test_humanmac_fde,
                 "test_humanmac_mmade_best": test_humanmac_mmade,
                 "test_humanmac_mmfde_best": test_humanmac_mmfde,
+                "test_humanmac_cmd_best": test_humanmac_cmd,
+                "test_humanmac_fid_best": test_humanmac_fid,
             }
             results_by_model[model_name] = model_result
             csv_rows.append(model_result)

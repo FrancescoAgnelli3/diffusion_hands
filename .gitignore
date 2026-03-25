@@ -43,6 +43,7 @@ inference/
 
 # Tool-specific generated dirs under vendor
 vendor/comusion/**
+vendor/gsps/**
 vendor/dlow/results/
 vendor/humanmac/results/
 vendor/humanmac/inference/

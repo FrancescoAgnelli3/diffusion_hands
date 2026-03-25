@@ -25,11 +25,13 @@ models:
     enabled: true
   belfusion:
     enabled: true
-  # comusion:
-  #   enabled: true
+  comusion:
+    enabled: true
   dlow_cvae:
     enabled: true
   humanmac:
     enabled: true
   skeletondiffusion:
+    enabled: true
+  gsps:
     enabled: true

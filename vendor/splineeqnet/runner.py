@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from config import DatasetCfg, TrainCfg
+from data import resolve_twostage_hand_graph_metadata
 from train_utils import train
 
 
@@ -62,6 +63,10 @@ def run_experiment(
     humanmac_multimodal_threshold: float = 0.5,
 ) -> Optional[Dict[str, float]]:
     set_global_seed(ds.seed)
+    twostage_graph_meta = resolve_twostage_hand_graph_metadata(
+        ds.dataset,
+        tuple(int(idx) for idx in ds.wrist_indices),
+    )
 
     model_key = str(train_cfg.model).strip().lower()
     if model_key not in {"simlpe_dct", "twostage_dct_diffusion"}:
@@ -116,6 +121,15 @@ def run_experiment(
         "action_filter": ds.action_filter,
         "edge_index": tuple(ds.edge_index),
         "adjacency": tuple(tuple(int(val) for val in row) for row in ds.adjacency) if ds.adjacency else tuple(),
+        "twostage_wrist_index": int(twostage_graph_meta["wrist_index"]),
+        "twostage_links": tuple(
+            (int(pair[0]), int(pair[1])) for pair in tuple(twostage_graph_meta["links"])
+        ),
+        "early_stopping_enabled": bool(train_cfg.early_stopping_enabled),
+        "early_stopping_patience": int(train_cfg.early_stopping_patience),
+        "early_stopping_min_delta": float(train_cfg.early_stopping_min_delta),
+        "early_stopping_warmup": int(train_cfg.early_stopping_warmup),
+        "early_stopping_monitor": str(train_cfg.early_stopping_monitor),
     }
 
     if save_best_model:

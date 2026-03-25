@@ -213,6 +213,8 @@ def compute_metrics_assembly(
         "FDE": humanmac_metrics["humanmac_fde"],
         "MMADE": humanmac_metrics["humanmac_mmade"],
         "MMFDE": humanmac_metrics["humanmac_mmfde"],
+        "CMD": humanmac_metrics["humanmac_cmd"],
+        "FID": humanmac_metrics["humanmac_fid"],
         "samples": float(total_samples),
         "assembly_eval_split": eval_split_name,
         "assembly_mpjpe_best_of_k": float(best_of_k),
@@ -226,6 +228,8 @@ def compute_metrics_assembly(
         "test_humanmac_fde_best": humanmac_metrics["humanmac_fde"],
         "test_humanmac_mmade_best": humanmac_metrics["humanmac_mmade"],
         "test_humanmac_mmfde_best": humanmac_metrics["humanmac_mmfde"],
+        "test_humanmac_cmd_best": humanmac_metrics["humanmac_cmd"],
+        "test_humanmac_fid_best": humanmac_metrics["humanmac_fid"],
         "test_samples": float(total_samples),
         # Compatibility keys used by SplineEqNet reporting scripts
         "validation_mpjpe_best": total_mpjpe / total_samples,
@@ -235,6 +239,8 @@ def compute_metrics_assembly(
         "validation_humanmac_fde_best": humanmac_metrics["humanmac_fde"],
         "validation_humanmac_mmade_best": humanmac_metrics["humanmac_mmade"],
         "validation_humanmac_mmfde_best": humanmac_metrics["humanmac_mmfde"],
+        "validation_humanmac_cmd_best": humanmac_metrics["humanmac_cmd"],
+        "validation_humanmac_fid_best": humanmac_metrics["humanmac_fid"],
         "validation_samples": float(total_samples),
     }
 
@@ -242,7 +248,8 @@ def compute_metrics_assembly(
     print(
         f"Assembly-{eval_split_name}: MPJPE={results['MPJPE']:.6f} | MPJPE_norm={results['MPJPE_norm']:.6f} | "
         f"APD={results['APD']:.6f} | ADE={results['ADE']:.6f} | FDE={results['FDE']:.6f} | "
-        f"MMADE={results['MMADE']:.6f} | MMFDE={results['MMFDE']:.6f} | samples={total_samples}"
+        f"MMADE={results['MMADE']:.6f} | MMFDE={results['MMFDE']:.6f} | "
+        f"CMD={results['CMD']:.6f} | FID={results['FID']:.6f} | samples={total_samples}"
     )
     print("=" * 80)
 

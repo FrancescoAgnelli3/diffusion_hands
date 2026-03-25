@@ -55,12 +55,13 @@ def train(epoch):
     logger.info('====> Epoch: {} Time: {:.2f} {} lr: {:.5f}'.format(epoch, dt, losses_str, lr))
     for name, loss in zip(loss_names, train_losses):
         tb_logger.add_scalar('vae_' + name, loss, epoch)
+    return float(train_losses[0])
 
 
 @torch.no_grad()
 def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
     model.eval()
-    stats_names = ['MPJPE', 'MPJPE_NORM', 'APD', 'ADE', 'FDE', 'MMADE', 'MMFDE']
+    stats_names = ['MPJPE', 'MPJPE_NORM', 'APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID']
     stats_meter = {x: AverageMeter() for x in stats_names}
 
     data_gen = eval_dataset.iter_generator_with_scale()
@@ -96,7 +97,7 @@ def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
 
         stats_meter['MPJPE'].update(float(per_sample_mpjpe.mean().item()))
         stats_meter['MPJPE_NORM'].update(float(per_sample_mpjpe_norm.mean().item()))
-        for k in ('APD', 'ADE', 'FDE', 'MMADE', 'MMFDE'):
+        for k in ('APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID'):
             stats_meter[k].update(float(hm[k]))
 
     if num_samples == 0:
@@ -187,8 +188,28 @@ if __name__ == '__main__':
     if mode == 'train':
         model.to(device)
         model.train()
+        es_enabled = bool(getattr(cfg, 'early_stopping_enabled', False))
+        es_patience = max(1, int(getattr(cfg, 'early_stopping_patience', 20)))
+        es_min_delta = float(getattr(cfg, 'early_stopping_min_delta', 1e-4))
+        es_warmup = max(0, int(getattr(cfg, 'early_stopping_warmup', 0)))
+        es_best = None
+        es_bad_epochs = 0
+
         for i in range(0, cfg.num_vae_epoch):
-            train(i)
+            total_loss = train(i)
+            if es_enabled and (i + 1) > es_warmup and np.isfinite(total_loss):
+                improved = es_best is None or total_loss < (float(es_best) - es_min_delta)
+                if improved:
+                    es_best = total_loss
+                    es_bad_epochs = 0
+                else:
+                    es_bad_epochs += 1
+                    if es_bad_epochs >= es_patience:
+                        print(
+                            f"[DLow][EarlyStop] epoch={i + 1} "
+                            f"best={float(es_best):.6f} current={total_loss:.6f}"
+                        )
+                        break
         if args.eval_after_train:
             evaluate_assembly_vae(
                 eval_sample_num=max(1, int(args.eval_sample_num)),

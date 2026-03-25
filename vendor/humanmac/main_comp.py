@@ -19,6 +19,17 @@ if _PROJECT_ROOT not in sys.path:
 from common.preprocessing import split_train_val_test  # type: ignore
 
 
+def _str2bool(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y"}:
+        return True
+    if text in {"0", "false", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got: {value!r}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg', default='assembly', help='assembly')
@@ -46,7 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_gif_interval', type=int, default=20)
     parser.add_argument('--save_metrics_interval', type=int, default=100)
     parser.add_argument('--ckpt', type=str, default='./checkpoints/assembly_ckpt.pt')
-    parser.add_argument('--ema', type=bool, default=True)
+    parser.add_argument('--ema', type=_str2bool, default=True)
     parser.add_argument('--vis_switch_num', type=int, default=10)
     parser.add_argument('--vis_col', type=int, default=5)
     parser.add_argument('--vis_row', type=int, default=3)
@@ -56,8 +67,18 @@ if __name__ == '__main__':
                         help='Optional filename filter for dataset files (used by assembly).')
     parser.add_argument('--mpjpe_best_of_k', type=int, default=None,
                         help='Number of stochastic samples for MPJPE best-of-k evaluation.')
-    parser.add_argument('--validate_last_epoch_only', type=bool, default=True,
+    parser.add_argument('--validate_last_epoch_only', type=_str2bool, default=True,
                         help='If True, run validation only at the final epoch.')
+    parser.add_argument('--early_stopping_enabled', type=_str2bool, default=None,
+                        help='Enable early stopping.')
+    parser.add_argument('--early_stopping_patience', type=int, default=None,
+                        help='Early stopping patience in epochs.')
+    parser.add_argument('--early_stopping_min_delta', type=float, default=None,
+                        help='Minimum improvement for early stopping.')
+    parser.add_argument('--early_stopping_warmup', type=int, default=None,
+                        help='Warmup epochs before enabling early stopping checks.')
+    parser.add_argument('--early_stopping_monitor', type=str, default=None,
+                        help='Monitor for early stopping: train_loss or val_loss.')
     args = parser.parse_args()
 
     seed_set(args.seed)

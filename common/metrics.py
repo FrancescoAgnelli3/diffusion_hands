@@ -16,6 +16,179 @@ def _to_tensor(x: TensorLike, *, dtype: torch.dtype = torch.float32, device=None
     return torch.as_tensor(x, dtype=dtype, device=device)
 
 
+def _reshape_motion_sequences(x: TensorLike, *, is_prediction: bool) -> torch.Tensor:
+    t = _to_tensor(x, dtype=torch.float32, device=None).detach().cpu()
+    if t.dim() == 5:
+        if t.shape[-1] != 3:
+            raise ValueError(f"Expected last dim=3 for 5D motion tensor, got shape={tuple(t.shape)}")
+        if is_prediction:
+            # [K,B,T,N,3] -> [K*B,T,N,3] (also supports [B,K,T,N,3] by flattening first two axes).
+            return t.reshape(-1, t.shape[2], t.shape[3], t.shape[4])
+        # [B,T,N,3]
+        return t
+    if t.dim() == 4:
+        if t.shape[-1] == 3:
+            if is_prediction:
+                # [S,T,N,3]
+                return t
+            # [B,T,N,3]
+            return t
+        if t.shape[-1] % 3 != 0:
+            raise ValueError(f"Expected flattened xyz dim divisible by 3, got shape={tuple(t.shape)}")
+        if is_prediction:
+            # [K,B,T,NC] -> [K*B,T,N,3]
+            return t.reshape(t.shape[0] * t.shape[1], t.shape[2], -1, 3)
+        raise ValueError(f"Unsupported 4D target tensor shape={tuple(t.shape)}")
+    if t.dim() == 3:
+        if t.shape[-1] % 3 != 0:
+            raise ValueError(f"Expected flattened xyz dim divisible by 3, got shape={tuple(t.shape)}")
+        if is_prediction:
+            # [S,T,NC] -> [S,T,N,3]
+            return t.reshape(t.shape[0], t.shape[1], -1, 3)
+        # [B,T,NC] -> [B,T,N,3]
+        return t.reshape(t.shape[0], t.shape[1], -1, 3)
+    raise ValueError(f"Unsupported motion tensor rank={t.dim()}, shape={tuple(t.shape)}")
+
+
+def _velocity_magnitudes_per_frame(seqs_btn3: torch.Tensor) -> torch.Tensor:
+    if seqs_btn3.dim() != 4 or seqs_btn3.shape[-1] != 3:
+        raise ValueError(f"Expected [S,T,N,3], got shape={tuple(seqs_btn3.shape)}")
+    if seqs_btn3.shape[1] <= 1:
+        return torch.zeros((seqs_btn3.shape[0], 1), dtype=seqs_btn3.dtype)
+    vel = torch.linalg.norm(seqs_btn3[:, 1:] - seqs_btn3[:, :-1], dim=-1)  # [S,T-1,N]
+    return vel.mean(dim=-1)  # [S,T-1]
+
+
+def cumulative_motion_distribution_distance(
+    pred_candidates: TensorLike,
+    gt_future: TensorLike,
+    *,
+    num_bins: int = 200,
+) -> float:
+    pred_seq = _reshape_motion_sequences(pred_candidates, is_prediction=True)
+    gt_seq = _reshape_motion_sequences(gt_future, is_prediction=False)
+    pred_motion = _velocity_magnitudes_per_frame(pred_seq).reshape(-1).numpy()
+    gt_motion = _velocity_magnitudes_per_frame(gt_seq).reshape(-1).numpy()
+
+    if pred_motion.size == 0 or gt_motion.size == 0:
+        return float("nan")
+
+    lo = float(min(pred_motion.min(), gt_motion.min()))
+    hi = float(max(pred_motion.max(), gt_motion.max()))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return float("nan")
+    if hi <= lo + 1e-12:
+        return 0.0
+
+    bins = np.linspace(lo, hi, int(max(2, num_bins)) + 1, dtype=np.float64)
+    p_hist, _ = np.histogram(pred_motion, bins=bins)
+    g_hist, _ = np.histogram(gt_motion, bins=bins)
+    p_sum = int(p_hist.sum())
+    g_sum = int(g_hist.sum())
+    if p_sum <= 0 or g_sum <= 0:
+        return float("nan")
+
+    p_cdf = np.cumsum(p_hist.astype(np.float64) / float(p_sum))
+    g_cdf = np.cumsum(g_hist.astype(np.float64) / float(g_sum))
+    bin_width = (hi - lo) / float(len(p_cdf))
+    return float(np.sum(np.abs(p_cdf - g_cdf)) * bin_width)
+
+
+def _trajectory_features(seqs_btn3: torch.Tensor) -> np.ndarray:
+    if seqs_btn3.dim() != 4 or seqs_btn3.shape[-1] != 3:
+        raise ValueError(f"Expected [S,T,N,3], got shape={tuple(seqs_btn3.shape)}")
+    mean_pos = seqs_btn3.mean(dim=2)  # [S,T,3]
+    mean_pos = mean_pos - mean_pos[:, :1, :]
+    if seqs_btn3.shape[1] <= 1:
+        mean_vel = torch.zeros((seqs_btn3.shape[0], 1), dtype=seqs_btn3.dtype)
+        std_vel = torch.zeros((seqs_btn3.shape[0], 1), dtype=seqs_btn3.dtype)
+    else:
+        vel = seqs_btn3[:, 1:] - seqs_btn3[:, :-1]  # [S,T-1,N,3]
+        vel_mag = torch.linalg.norm(vel, dim=-1)  # [S,T-1,N]
+        mean_vel = vel_mag.mean(dim=-1)  # [S,T-1]
+        std_vel = vel_mag.std(dim=-1, unbiased=False)  # [S,T-1]
+    feat = torch.cat(
+        [
+            mean_pos.reshape(seqs_btn3.shape[0], -1),
+            mean_vel.reshape(seqs_btn3.shape[0], -1),
+            std_vel.reshape(seqs_btn3.shape[0], -1),
+        ],
+        dim=1,
+    )
+    return feat.numpy().astype(np.float64, copy=False)
+
+
+def _subsample_rows(arr: np.ndarray, n_rows: int) -> np.ndarray:
+    if arr.shape[0] <= n_rows:
+        return arr
+    idx = np.linspace(0, arr.shape[0] - 1, num=n_rows, dtype=np.int64)
+    return arr[idx]
+
+
+def _mean_and_cov(feats: np.ndarray, *, eps: float = 1e-6) -> Tuple[np.ndarray, np.ndarray]:
+    mu = feats.mean(axis=0)
+    if feats.shape[0] <= 1:
+        cov = np.eye(feats.shape[1], dtype=np.float64) * float(eps)
+        return mu, cov
+    cov = np.cov(feats, rowvar=False)
+    if cov.ndim == 0:
+        cov = np.array([[float(cov)]], dtype=np.float64)
+    cov = np.asarray(cov, dtype=np.float64)
+    cov = (cov + cov.T) * 0.5
+    cov += np.eye(cov.shape[0], dtype=np.float64) * float(eps)
+    return mu, cov
+
+
+def frechet_motion_distance(
+    pred_candidates: TensorLike,
+    gt_future: TensorLike,
+    *,
+    max_samples: int = 5000,
+    eps: float = 1e-6,
+) -> float:
+    pred_seq = _reshape_motion_sequences(pred_candidates, is_prediction=True)
+    gt_seq = _reshape_motion_sequences(gt_future, is_prediction=False)
+    pred_feat = _trajectory_features(pred_seq)
+    gt_feat = _trajectory_features(gt_seq)
+
+    if pred_feat.shape[0] == 0 or gt_feat.shape[0] == 0:
+        return float("nan")
+    n = int(min(pred_feat.shape[0], gt_feat.shape[0], max(1, int(max_samples))))
+    pred_feat = _subsample_rows(pred_feat, n)
+    gt_feat = _subsample_rows(gt_feat, n)
+
+    mu_p, cov_p = _mean_and_cov(pred_feat, eps=eps)
+    mu_g, cov_g = _mean_and_cov(gt_feat, eps=eps)
+
+    cov_p = np.asarray(cov_p, dtype=np.float64)
+    cov_g = np.asarray(cov_g, dtype=np.float64)
+    cov_p = (cov_p + cov_p.T) * 0.5
+    cov_g = (cov_g + cov_g.T) * 0.5
+
+    eigvals_p, eigvecs_p = np.linalg.eigh(cov_p)
+    eigvals_p = np.clip(eigvals_p, a_min=0.0, a_max=None)
+    sqrt_cov_p = (eigvecs_p * np.sqrt(eigvals_p + float(eps))) @ eigvecs_p.T
+    mid = sqrt_cov_p @ cov_g @ sqrt_cov_p
+    mid = (mid + mid.T) * 0.5
+    eigvals_mid = np.linalg.eigvalsh(mid)
+    eigvals_mid = np.clip(eigvals_mid, a_min=0.0, a_max=None)
+    trace_sqrt = float(np.sum(np.sqrt(eigvals_mid + float(eps))))
+
+    diff = mu_p - mu_g
+    fid = float(diff.dot(diff) + np.trace(cov_p) + np.trace(cov_g) - 2.0 * trace_sqrt)
+    return max(0.0, fid)
+
+
+def distributional_motion_metrics(
+    pred_candidates: TensorLike,
+    gt_future: TensorLike,
+) -> Dict[str, float]:
+    return {
+        "CMD": cumulative_motion_distribution_distance(pred_candidates, gt_future),
+        "FID": frechet_motion_distance(pred_candidates, gt_future),
+    }
+
+
 def time_slice(array: torch.Tensor, t0: int, t: int, axis: int) -> torch.Tensor:
     if t == -1:
         return torch.index_select(
@@ -117,7 +290,15 @@ def humanmac_metrics(
     threshold: float = 0.5,
 ) -> Dict[str, float]:
     if pred_candidates.numel() == 0 or gt_future.numel() == 0 or start_pose.numel() == 0:
-        return {"APD": float("nan"), "ADE": float("nan"), "FDE": float("nan"), "MMADE": float("nan"), "MMFDE": float("nan")}
+        return {
+            "APD": float("nan"),
+            "ADE": float("nan"),
+            "FDE": float("nan"),
+            "MMADE": float("nan"),
+            "MMFDE": float("nan"),
+            "CMD": float("nan"),
+            "FID": float("nan"),
+        }
 
     pred_flat = pred_candidates.reshape(
         pred_candidates.shape[0], pred_candidates.shape[1], pred_candidates.shape[2], -1
@@ -159,13 +340,15 @@ def humanmac_metrics(
         mmfde_total += float(mmfde_val.item())
 
     denom = max(1, num_samples)
-    return {
+    out = {
         "APD": apd_total / denom,
         "ADE": ade_total / denom,
         "FDE": fde_total / denom,
         "MMADE": mmade_total / denom,
         "MMFDE": mmfde_total / denom,
     }
+    out.update(distributional_motion_metrics(pred_candidates, gt_future))
+    return out
 
 
 def humanmac_metrics_prefixed(
@@ -182,6 +365,8 @@ def humanmac_metrics_prefixed(
         "humanmac_fde": m["FDE"],
         "humanmac_mmade": m["MMADE"],
         "humanmac_mmfde": m["MMFDE"],
+        "humanmac_cmd": m["CMD"],
+        "humanmac_fid": m["FID"],
     }
 
 
@@ -246,4 +431,3 @@ def compute_all_metrics_single(
     ade_v = dist[:, -1].mean(dim=1).min(dim=0).values.mean()
     fde_v = dist[:, -1, -1].min(dim=0).values.mean()
     return diversity, ade_v, fde_v, mmade, mmfde
-

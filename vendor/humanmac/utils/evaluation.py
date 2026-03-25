@@ -1,10 +1,18 @@
 import csv
+import os
+import sys
+from pathlib import Path
 
 import pandas as pd
 from utils.metrics import *
 from tqdm import tqdm
 from utils import *
 from utils.script import sample_preprocessing
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+from common.metrics import distributional_motion_metrics  # type: ignore
 
 tensor = torch.tensor
 DoubleTensor = torch.DoubleTensor
@@ -55,7 +63,7 @@ def compute_stats(diffusion, multimodal_dict, model, logger, cfg):
     traj_gt_arr = multimodal_dict['traj_gt_arr']
     num_samples = multimodal_dict['num_samples']
 
-    stats_names = ['APD', 'ADE', 'FDE', 'MMADE', 'MMFDE']
+    stats_names = ['APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID']
     stats_meter = {x: {y: AverageMeter() for y in ['HumanMAC']} for x in stats_names}
 
     K = EVAL_SAMPLES_PER_SEQUENCE
@@ -88,6 +96,11 @@ def compute_stats(diffusion, multimodal_dict, model, logger, cfg):
                 stats_meter['FDE']['HumanMAC'].update(fde)
                 stats_meter['MMADE']['HumanMAC'].update(mmade)
                 stats_meter['MMFDE']['HumanMAC'].update(mmfde)
+
+            motion_dist_metrics = distributional_motion_metrics(pred, gt_group)
+            stats_meter['CMD']['HumanMAC'].update(float(motion_dist_metrics['CMD']))
+            stats_meter['FID']['HumanMAC'].update(float(motion_dist_metrics['FID']))
+
             for stats in stats_names:
                 str_stats = f'{stats}: ' + ' '.join(
                     [f'{x}: {y.avg:.4f}' for x, y in stats_meter[stats].items()]
@@ -103,7 +116,15 @@ def compute_stats(diffusion, multimodal_dict, model, logger, cfg):
         writer.writeheader()
         for stats, meter in stats_meter.items():
             new_meter = {x: y.avg for x, y in meter.items()}
-            new_meter['HumanMAC'] = new_meter['HumanMAC'].cpu().numpy()
+            val = new_meter['HumanMAC']
+            if isinstance(val, torch.Tensor):
+                if val.numel() == 1:
+                    val = float(val.detach().cpu().item())
+                else:
+                    val = float(val.detach().cpu().mean().item())
+            else:
+                val = float(val)
+            new_meter['HumanMAC'] = val
             new_meter['Metric'] = stats
             writer.writerow(new_meter)
     df1 = pd.read_csv(file_latest % cfg.result_dir)

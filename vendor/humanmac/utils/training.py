@@ -1,4 +1,5 @@
 import copy
+import math
 import time
 
 from torch import optim, nn
@@ -50,10 +51,18 @@ class Trainer:
         else:
             self.ema_model = None
             self.ema_setup = None
+        self.early_stopping_enabled = bool(getattr(self.cfg, 'early_stopping_enabled', False))
+        self.early_stopping_patience = max(1, int(getattr(self.cfg, 'early_stopping_patience', 20)))
+        self.early_stopping_min_delta = float(getattr(self.cfg, 'early_stopping_min_delta', 1e-4))
+        self.early_stopping_warmup = max(0, int(getattr(self.cfg, 'early_stopping_warmup', 0)))
+        self.early_stopping_monitor = str(getattr(self.cfg, 'early_stopping_monitor', 'train_loss')).strip().lower()
+        self._early_best = None
+        self._early_bad_epochs = 0
 
     def loop(self):
         self.before_train()
         for self.iter in range(0, self.cfg.num_epoch):
+            did_validate = False
             self.before_train_step()
             self.run_train_step()
             self.after_train_step()
@@ -63,6 +72,45 @@ class Trainer:
                 self.before_val_step()
                 self.run_val_step()
                 self.after_val_step()
+                did_validate = True
+            if self._should_stop_early(self.iter + 1, did_validate):
+                if not did_validate:
+                    self.before_val_step()
+                    self.run_val_step()
+                    self.after_val_step()
+                break
+
+    def _should_stop_early(self, epoch_idx: int, did_validate: bool) -> bool:
+        if not self.early_stopping_enabled:
+            return False
+        if epoch_idx <= self.early_stopping_warmup:
+            return False
+
+        monitor_val = None
+        if self.early_stopping_monitor == 'val_loss':
+            if did_validate and self.val_losses is not None:
+                monitor_val = float(self.val_losses.avg)
+        else:
+            if self.train_losses is not None:
+                monitor_val = float(self.train_losses.avg)
+
+        if monitor_val is None or not math.isfinite(monitor_val):
+            return False
+
+        improved = self._early_best is None or monitor_val < (float(self._early_best) - self.early_stopping_min_delta)
+        if improved:
+            self._early_best = monitor_val
+            self._early_bad_epochs = 0
+            return False
+
+        self._early_bad_epochs += 1
+        if self._early_bad_epochs >= self.early_stopping_patience:
+            self.logger.info(
+                f"[EarlyStop] epoch={epoch_idx} monitor={self.early_stopping_monitor} "
+                f"best={float(self._early_best):.6f} current={monitor_val:.6f}"
+            )
+            return True
+        return False
 
     def before_train(self):
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.cfg.lr)

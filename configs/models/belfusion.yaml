@@ -2,19 +2,15 @@ model: belfusion
 enabled: true
 train:
   epochs: 20
-eval: {}
-options: {}
+  early_stopping:
+    enabled: true
+    patience: 5
+    min_delta: 0.0001
+    warmup: 2
+    monitor: auto
 defaults:
   seed: 0
   data:
-    dataset: assembly
-    data_dir: /mnt/turing-datasets/AssemblyHands/assembly101-download-scripts/data_our/
-    action_filter: pick_up_screwd
-    input_n: 70
-    output_n: 30
-    stride: 5
-    time_interp: null
-    window_norm: null
     n_nodes: 21
   model:
     hidden_dim: 512
@@ -27,10 +23,4 @@ defaults:
     l1_weight: 1.0
     num_workers: 0
   eval:
-    num_candidates: 10
-    multimodal_threshold: 0.5
     batch_size: 256
-  runtime:
-    output_dir: /home/agnelli/projects/diffusion_hands/vendor/belfusion/results/default
-    checkpoint_name: belfusion_last.pt
-    metrics_csv: /home/agnelli/projects/diffusion_hands/vendor/belfusion/results/default/eval_stats.csv

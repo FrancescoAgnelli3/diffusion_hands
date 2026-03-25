@@ -104,6 +104,11 @@ class Config:
 
         self.dct_norm_enable = cfg['dct_norm_enable']
         self.mpjpe_best_of_k = cfg.get('mpjpe_best_of_k', 1)
+        self.early_stopping_enabled = cfg.get('early_stopping_enabled', False)
+        self.early_stopping_patience = cfg.get('early_stopping_patience', 20)
+        self.early_stopping_min_delta = cfg.get('early_stopping_min_delta', 1e-4)
+        self.early_stopping_warmup = cfg.get('early_stopping_warmup', 0)
+        self.early_stopping_monitor = cfg.get('early_stopping_monitor', 'train_loss')
 
         # indirect variable
         self.joint_num = 20

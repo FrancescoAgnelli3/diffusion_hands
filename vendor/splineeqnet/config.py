@@ -58,6 +58,7 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_denoiser_heads": 8,
         "twostage_dropout": 0.0,
         "twostage_freeze_coarse": True,
+        "twostage_diffusion_coarse_warmup_epochs": 10,
         "twostage_cond_use_history": False,
         "twostage_cond_use_coarse": True,
         "twostage_use_mamp_condition": False,
@@ -68,6 +69,7 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_mamp_mask_ratio": 0.0,
         "twostage_mamp_motion_aware_tau": 0.80,
         "twostage_mpjpe_weight": 0.0,
+        "twostage_x0_loss_weight": 0.0,
         "epochs": 50,
         "early_stopping_enabled": True,
         "early_stopping_patience": 20,
@@ -136,6 +138,7 @@ class TrainCfg:
     twostage_denoiser_heads: Optional[int] = None
     twostage_dropout: Optional[float] = None
     twostage_freeze_coarse: Optional[bool] = None
+    twostage_diffusion_coarse_warmup_epochs: Optional[int] = None
     twostage_cond_use_history: Optional[bool] = None
     twostage_cond_use_coarse: Optional[bool] = None
     twostage_use_mamp_condition: Optional[bool] = None
@@ -146,6 +149,7 @@ class TrainCfg:
     twostage_mamp_mask_ratio: Optional[float] = None
     twostage_mamp_motion_aware_tau: Optional[float] = None
     twostage_mpjpe_weight: Optional[float] = None
+    twostage_x0_loss_weight: Optional[float] = None
 
 
 def parse_list(arg: str, cast):

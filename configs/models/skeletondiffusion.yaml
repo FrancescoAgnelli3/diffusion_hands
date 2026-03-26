@@ -6,7 +6,7 @@ train:
     iter_per_epoch: 580
     early_stopping:
       enabled: true
-      patience: 10
+      patience: 15
       min_delta: 0.0001
       warmup: 5
       monitor: train_loss
@@ -16,7 +16,7 @@ train:
     iter_per_epoch: null
     early_stopping:
       enabled: true
-      patience: 10
+      patience: 15
       min_delta: 0.0001
       warmup: 5
       monitor: train_loss
@@ -96,11 +96,6 @@ defaults:
       batch_size: 512
       batch_size_eval: 512
       if_run_validation: false
-      early_stopping_enabled: false
-      early_stopping_patience: 20
-      early_stopping_min_delta: 1.0e-4
-      early_stopping_warmup: 0
-      early_stopping_monitor: train_loss
       eval_frequency: 50
       save_frequency: 50
       num_epochs: 50
@@ -181,11 +176,6 @@ defaults:
       batch_size: 64
       batch_size_eval: 256
       if_run_validation: false
-      early_stopping_enabled: false
-      early_stopping_patience: 20
-      early_stopping_min_delta: 1.0e-4
-      early_stopping_warmup: 0
-      early_stopping_monitor: train_loss
       eval_frequency: 25
       train_pick_best_sample_among_k: 50
       similarity_space: input_space

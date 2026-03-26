@@ -24,14 +24,14 @@ models:
   twostage_dct_diffusion:
     enabled: true
   belfusion:
-    enabled: true
+    enabled: false
   comusion:
-    enabled: true
+    enabled: false
   dlow_cvae:
-    enabled: true
+    enabled: false
   humanmac:
-    enabled: true
+    enabled: false
   skeletondiffusion:
-    enabled: true
+    enabled: false
   gsps:
-    enabled: true
+    enabled: false

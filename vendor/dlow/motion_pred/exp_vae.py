@@ -207,7 +207,7 @@ if __name__ == '__main__':
                     if es_bad_epochs >= es_patience:
                         print(
                             f"[DLow][EarlyStop] epoch={i + 1} "
-                            f"best={float(es_best):.6f} current={total_loss:.6f}"
+                            f"best={float(es_best):.6f} current={float(total_loss):.6f}"
                         )
                         break
         if args.eval_after_train:

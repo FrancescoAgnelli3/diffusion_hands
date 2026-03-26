@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import importlib.util
 import json
 import random
 from dataclasses import dataclass
@@ -23,8 +24,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.metrics import splineeqnet_diffusion_batch_eval
-from common.preprocessing import select_most_active_hand, split_train_val_test
-
 
 @dataclass
 class WindowSample:
@@ -108,24 +107,23 @@ def sanitize(text: str) -> str:
     return (text or "all").replace("/", "_").replace(" ", "_")
 
 
-def _build_windows(
-    files: Sequence[str],
+def _build_windows_from_sequences(
+    sequences: Sequence[torch.Tensor],
+    norm_factors: Sequence[torch.Tensor | float],
     input_n: int,
     output_n: int,
     stride: int,
-    time_interp: int | None,
-    window_norm: int | None,
 ) -> List[WindowSample]:
     samples: List[WindowSample] = []
     total = input_n + output_n
-    for p in files:
-        selected = select_most_active_hand(p, time_interp=time_interp, window_norm=window_norm)
-        if selected is None:
-            continue
-        seq, norm = selected
+    stride = max(1, int(stride))
+    for seq_idx, seq_tensor in enumerate(sequences):
+        seq = seq_tensor[..., 4:].detach().cpu().numpy().astype(np.float32)
         if seq.shape[0] < total:
             continue
-        for st in range(0, seq.shape[0] - total + 1, max(1, int(stride))):
+        norm_raw = norm_factors[seq_idx] if seq_idx < len(norm_factors) else 1.0
+        norm = float(norm_raw.item()) if isinstance(norm_raw, torch.Tensor) else float(norm_raw)
+        for st in range(0, seq.shape[0] - total + 1, stride):
             obs = seq[st : st + input_n]
             fut = seq[st + input_n : st + total]
             samples.append(WindowSample(obs=obs.astype(np.float32), fut=fut.astype(np.float32), norm=float(norm)))
@@ -133,22 +131,93 @@ def _build_windows(
 
 
 def load_split_samples(cfg: Dict[str, object]) -> Tuple[List[WindowSample], List[WindowSample], List[WindowSample]]:
+    splineeqnet_root = Path(
+        str(cfg.get("data", {}).get("splineeqnet_root", ROOT / "vendor" / "splineeqnet"))
+    ).resolve()
+    cfg_path = splineeqnet_root / "config.py"
+    data_path = splineeqnet_root / "data.py"
+    if not cfg_path.exists() or not data_path.exists():
+        raise RuntimeError(f"SplineEqNet modules not found under '{splineeqnet_root}'.")
+
+    cfg_spec = importlib.util.spec_from_file_location("splineeqnet_config", cfg_path)
+    data_spec = importlib.util.spec_from_file_location("splineeqnet_data", data_path)
+    if cfg_spec is None or cfg_spec.loader is None or data_spec is None or data_spec.loader is None:
+        raise RuntimeError(f"Unable to import SplineEqNet modules from '{splineeqnet_root}'.")
+
+    splineeqnet_root_str = str(splineeqnet_root)
+    added_root = False
+    if splineeqnet_root_str not in sys.path:
+        sys.path.insert(0, splineeqnet_root_str)
+        added_root = True
+
+    cfg_mod = importlib.util.module_from_spec(cfg_spec)
+    data_mod = importlib.util.module_from_spec(data_spec)
+    cfg_spec.loader.exec_module(cfg_mod)
+    prev_config_mod = sys.modules.get("config")
+    sys.modules["config"] = cfg_mod
+    try:
+        data_spec.loader.exec_module(data_mod)
+    finally:
+        if prev_config_mod is None:
+            sys.modules.pop("config", None)
+        else:
+            sys.modules["config"] = prev_config_mod
+        if added_root and splineeqnet_root_str in sys.path:
+            try:
+                sys.path.remove(splineeqnet_root_str)
+            except ValueError:
+                pass
+
+    DatasetCfg = cfg_mod.DatasetCfg
+    build_datasets = data_mod.build_datasets
+    get_dataset_metadata = data_mod.get_dataset_metadata
+
     data_cfg = cfg["data"]
-    train_files, val_files, test_files = split_train_val_test(
-        str(data_cfg["data_dir"]),
-        str(data_cfg.get("action_filter", "")),
-        int(cfg["seed"]),
+    dataset_name = str(data_cfg.get("dataset", "assembly")).lower()
+    metadata = get_dataset_metadata(dataset_name)
+    data_dir = str(data_cfg.get("data_dir") or metadata.get("default_dir", ""))
+    action_filter_raw = data_cfg.get("action_filter")
+    action_filter = metadata.get("default_action_filter", "") if action_filter_raw is None else str(action_filter_raw)
+    default_wrist_indices = tuple(int(x) for x in metadata.get("default_wrist_indices", (5, 26)))
+    ds_cfg = DatasetCfg(
+        data_dir=data_dir,
+        action_filter=action_filter,
+        input_n=int(data_cfg["input_n"]),
+        output_n=int(data_cfg["output_n"]),
+        stride=int(data_cfg["stride"]),
+        time_interp=data_cfg.get("time_interp"),
+        window_norm=data_cfg.get("window_norm"),
+        batch_size=1,
+        eval_batch_mult=1,
+        seed=int(cfg["seed"]),
+        wrist_indices=default_wrist_indices,
+        dataset=dataset_name,
+        node_count=int(metadata.get("node_count", 21)),
+        edge_index=tuple(metadata.get("edge_index", ())),
+        adjacency=tuple(metadata.get("adjacency", ())),
     )
+    train_ds, val_ds, test_ds = build_datasets(ds_cfg)
+
     kwargs = dict(
         input_n=int(data_cfg["input_n"]),
         output_n=int(data_cfg["output_n"]),
         stride=int(data_cfg["stride"]),
-        time_interp=data_cfg.get("time_interp", None),
-        window_norm=data_cfg.get("window_norm", None),
     )
-    train = _build_windows(train_files, **kwargs)
-    val = _build_windows(val_files, **kwargs)
-    test = _build_windows(test_files, **kwargs)
+    train = _build_windows_from_sequences(
+        getattr(train_ds, "sequences", []),
+        getattr(train_ds, "norm_factors", []),
+        **kwargs,
+    )
+    val = _build_windows_from_sequences(
+        getattr(val_ds, "sequences", []),
+        getattr(val_ds, "norm_factors", []),
+        **kwargs,
+    )
+    test = _build_windows_from_sequences(
+        getattr(test_ds, "sequences", []),
+        getattr(test_ds, "norm_factors", []),
+        **kwargs,
+    )
     return train, val, test
 
 
@@ -315,8 +384,8 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
                 improved = es_best is None or monitored_f < (float(es_best) - es_min_delta)
                 if improved:
                     es_best = monitored_f
-                    es_bad_epochs = 0
                     es_best_state = copy.deepcopy(model.state_dict())
+                    es_bad_epochs = 0
                 else:
                     es_bad_epochs += 1
                     if es_bad_epochs >= es_patience:

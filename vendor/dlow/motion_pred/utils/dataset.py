@@ -42,7 +42,10 @@ class Dataset:
         dict_s = self.data[subject]
         action = np.random.choice(list(dict_s.keys()))
         seq = dict_s[action]
-        fr_start = np.random.randint(seq.shape[0] - self.t_total)
+        max_start = int(seq.shape[0] - self.t_total)
+        if max_start < 0:
+            raise RuntimeError("Sampled sequence is shorter than t_his + t_pred.")
+        fr_start = 0 if max_start == 0 else np.random.randint(max_start + 1)
         fr_end = fr_start + self.t_total
         traj = seq[fr_start: fr_end]
         return traj[None, ...]
@@ -60,9 +63,11 @@ class Dataset:
         for data_s in self.data.values():
             for seq in data_s.values():
                 seq_len = seq.shape[0]
-                for i in range(0, seq_len - self.t_total, step):
+                max_start = seq_len - self.t_total
+                if max_start < 0:
+                    continue
+                for i in range(0, max_start + 1, step):
                     traj = seq[None, i: i + self.t_total]
                     yield traj
-
 
 

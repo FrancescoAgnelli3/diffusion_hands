@@ -190,6 +190,7 @@ def run_experiment(
         ("twostage_denoiser_heads", train_cfg.twostage_denoiser_heads, int),
         ("twostage_dropout", train_cfg.twostage_dropout, float),
         ("twostage_freeze_coarse", train_cfg.twostage_freeze_coarse, bool),
+        ("twostage_diffusion_coarse_warmup_epochs", train_cfg.twostage_diffusion_coarse_warmup_epochs, int),
         ("twostage_cond_use_history", train_cfg.twostage_cond_use_history, bool),
         ("twostage_cond_use_coarse", train_cfg.twostage_cond_use_coarse, bool),
         ("twostage_use_mamp_condition", train_cfg.twostage_use_mamp_condition, bool),
@@ -200,6 +201,7 @@ def run_experiment(
         ("twostage_mamp_mask_ratio", train_cfg.twostage_mamp_mask_ratio, float),
         ("twostage_mamp_motion_aware_tau", train_cfg.twostage_mamp_motion_aware_tau, float),
         ("twostage_mpjpe_weight", train_cfg.twostage_mpjpe_weight, float),
+        ("twostage_x0_loss_weight", train_cfg.twostage_x0_loss_weight, float),
     ]
     for key, value, caster in twostage_fields:
         if value is not None:

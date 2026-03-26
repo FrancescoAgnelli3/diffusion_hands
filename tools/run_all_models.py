@@ -137,6 +137,12 @@ def _append_long_csv(path: Path, row: Dict[str, object]) -> None:
                     for old_row in existing_rows:
                         ww.writerow({k: old_row.get(k, "") for k in header})
     write_header = not path.exists()
+    if path.exists() and path.stat().st_size > 0:
+        # Guard against previously interrupted writes leaving the file without a trailing newline.
+        with open(path, "rb+") as f:
+            f.seek(-1, os.SEEK_END)
+            if f.read(1) not in (b"\n", b"\r"):
+                f.write(b"\n")
     serialized: Dict[str, object] = {}
     for k in header:
         v = row.get(k, "")
@@ -755,11 +761,11 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
             f"output_log_path={autoenc_out}",
             *(["model.num_epochs=%d" % int(auto_epochs)] if auto_epochs is not None else []),
             *(["model.num_iter_perepoch=%d" % int(auto_iters)] if auto_iters is not None else []),
-            *(["model.early_stopping_enabled=%s" % ("true" if bool(auto_es_cfg.get("enabled", False)) else "false")] if auto_es_cfg else []),
-            *(["model.early_stopping_patience=%d" % int(auto_es_cfg.get("patience", 20))] if auto_es_cfg else []),
-            *(["model.early_stopping_min_delta=%s" % float(auto_es_cfg.get("min_delta", 1e-4))] if auto_es_cfg else []),
-            *(["model.early_stopping_warmup=%d" % int(auto_es_cfg.get("warmup", 0))] if auto_es_cfg else []),
-            *(["model.early_stopping_monitor=%s" % str(auto_es_cfg.get("monitor", "train_loss"))] if auto_es_cfg else []),
+            *(["++model.early_stopping_enabled=%s" % ("true" if bool(auto_es_cfg.get("enabled", False)) else "false")] if auto_es_cfg else []),
+            *(["++model.early_stopping_patience=%d" % int(auto_es_cfg.get("patience", 20))] if auto_es_cfg else []),
+            *(["++model.early_stopping_min_delta=%s" % float(auto_es_cfg.get("min_delta", 1e-4))] if auto_es_cfg else []),
+            *(["++model.early_stopping_warmup=%d" % int(auto_es_cfg.get("warmup", 0))] if auto_es_cfg else []),
+            *(["++model.early_stopping_monitor=%s" % str(auto_es_cfg.get("monitor", "train_loss"))] if auto_es_cfg else []),
         ]
     )
     rc = _run(auto_cmd, cwd=wd)
@@ -783,11 +789,11 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
             f"output_log_path={diff_out}",
             *(["model.num_epochs=%d" % int(diff_epochs)] if diff_epochs is not None else []),
             *(["model.num_iter_perepoch=%d" % int(diff_iters)] if diff_iters is not None else []),
-            *(["model.early_stopping_enabled=%s" % ("true" if bool(diff_es_cfg.get("enabled", False)) else "false")] if diff_es_cfg else []),
-            *(["model.early_stopping_patience=%d" % int(diff_es_cfg.get("patience", 20))] if diff_es_cfg else []),
-            *(["model.early_stopping_min_delta=%s" % float(diff_es_cfg.get("min_delta", 1e-4))] if diff_es_cfg else []),
-            *(["model.early_stopping_warmup=%d" % int(diff_es_cfg.get("warmup", 0))] if diff_es_cfg else []),
-            *(["model.early_stopping_monitor=%s" % str(diff_es_cfg.get("monitor", "train_loss"))] if diff_es_cfg else []),
+            *(["++model.early_stopping_enabled=%s" % ("true" if bool(diff_es_cfg.get("enabled", False)) else "false")] if diff_es_cfg else []),
+            *(["++model.early_stopping_patience=%d" % int(diff_es_cfg.get("patience", 20))] if diff_es_cfg else []),
+            *(["++model.early_stopping_min_delta=%s" % float(diff_es_cfg.get("min_delta", 1e-4))] if diff_es_cfg else []),
+            *(["++model.early_stopping_warmup=%d" % int(diff_es_cfg.get("warmup", 0))] if diff_es_cfg else []),
+            *(["++model.early_stopping_monitor=%s" % str(diff_es_cfg.get("monitor", "train_loss"))] if diff_es_cfg else []),
         ]
     )
     rc = _run(diff_cmd, cwd=wd)
@@ -970,6 +976,7 @@ def main() -> None:
     cfg = _load_yaml(config_path)
     cfg = _resolve_models_config(cfg, config_path)
     cfg["_shared_preprocessing"] = _resolve_shared_preprocessing(cfg)
+    cfg.setdefault("humanmac_multimodal_threshold", 0.5)
 
     data_roots = _resolve_data_roots(cfg)
     datasets = _resolve_datasets(cfg)

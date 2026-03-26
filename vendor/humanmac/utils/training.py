@@ -102,7 +102,6 @@ class Trainer:
             self._early_best = monitor_val
             self._early_bad_epochs = 0
             return False
-
         self._early_bad_epochs += 1
         if self._early_bad_epochs >= self.early_stopping_patience:
             self.logger.info(

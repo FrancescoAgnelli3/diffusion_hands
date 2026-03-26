@@ -1,0 +1,27 @@
+normalize_data: false
+nz: 128
+lambda_v: 1000
+beta: 0.1
+vae_specs:
+  rnn_type: gru
+  x_birnn: false
+  e_birnn: false
+  use_drnn_mlp: true
+vae_lr: 0.001
+batch_size: 64
+num_vae_epoch: 1
+num_vae_epoch_fix: 1
+num_vae_data_sample: 5000
+dataset: fpha
+data_dir: /mnt/turing-datasets/FPHA/data
+action_filter: ''
+t_his: 70
+t_pred: 30
+stride: 5
+time_interp: null
+window_norm: null
+splineeqnet_root: /home/agnelli/projects/diffusion_hands/vendor/splineeqnet
+seed: 0
+nk: 10
+early_stopping_enabled: false
+save_model_interval: 1

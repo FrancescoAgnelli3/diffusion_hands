@@ -4,14 +4,14 @@ train:
   epochs: 300
   early_stopping:
     enabled: true
-    patience: 20
+    patience: 15
     min_delta: 0.0001
-    warmup: 10
+    warmup: 5
     monitor: train_loss
 defaults:
   model_type: CoMusion
   dtype: float32
-  remove_model_internals: true
+  remove_model_internals: false
   model_specs:
     node_n: 63
     act: nn.Tanh
@@ -45,7 +45,7 @@ defaults:
     weight_decay: 0
   loss_weight_specs:
     history_weight: 1
-    future_weight: 1
+    future_weight: 0.3
   st_loss_specs:
     loss_weight_scale: 10
   logging_specs: {}

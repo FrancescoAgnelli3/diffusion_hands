@@ -339,6 +339,10 @@ def train(
     factorized_loss = None
     twostage_model = None
     twostage_phase: Optional[str] = None
+    twostage_diffusion_lr = float(learning_rate) * 0.1
+    twostage_train_coarse_in_diffusion = False
+    twostage_diffusion_coarse_warmup_epochs = 0
+    twostage_coarse_diffusion_group_added = False
     mamp_encoder = None
     mamp_num_frames = input_n
     contrastive_model = None
@@ -706,8 +710,14 @@ def train(
         n_heads = int(config.get("twostage_denoiser_heads", 8))
         p_drop = float(config.get("twostage_dropout", 0.0))
         freeze_coarse = bool(config.get("twostage_freeze_coarse", True))
+        twostage_train_coarse_in_diffusion = bool(freeze_coarse)
+        twostage_diffusion_coarse_warmup_epochs = max(
+            0, int(config.get("twostage_diffusion_coarse_warmup_epochs", 10))
+        )
+        twostage_diffusion_lr = float(learning_rate) * 0.1
         cond_use_history = bool(config.get("twostage_cond_use_history", True))
         cond_use_coarse = bool(config.get("twostage_cond_use_coarse", True))
+        x0_loss_weight = float(config.get("twostage_x0_loss_weight", 0.0))
         residual_ema_decay = float(config.get("twostage_residual_ema_decay", 0.99))
         residual_rms_eps = float(config.get("twostage_residual_rms_eps", 1e-6))
         twostage_wrist_cfg = config.get("twostage_wrist_index")
@@ -765,6 +775,7 @@ def train(
             freeze_coarse=freeze_coarse,
             cond_use_history=cond_use_history,
             cond_use_coarse=cond_use_coarse,
+            x0_loss_weight=x0_loss_weight,
             residual_ema_decay=residual_ema_decay,
             residual_rms_eps=residual_rms_eps,
             simlpe_use_norm=bool(config.get("simlpe_use_norm", True)),
@@ -919,7 +930,8 @@ def train(
         eval_phase = str(config.get("twostage_eval_phase", "")).strip().lower()
         if eval_phase in {"coarse", "diffusion"} and train_epochs <= 0:
             params = _set_twostage_phase(eval_phase)
-        optimizer = torch.optim.Adam(params, lr=learning_rate)
+        init_lr = twostage_diffusion_lr if twostage_phase == "diffusion" else learning_rate
+        optimizer = torch.optim.Adam(params, lr=init_lr)
         params_count = _print_model_parameters(twostage_model, title="TwoStageDCTDiffusionForecaster")
     elif model == "simlpe_wave":
         wavelet_num_scales = config.get("simlpe_wave_num_scales")
@@ -1613,6 +1625,9 @@ def train(
     early_stop_reset_on_phase_change = bool(config.get("early_stopping_reset_on_phase_change", True))
     early_stop_best: Optional[float] = None
     early_stop_bad_epochs = 0
+    # Epoch index (1-based) where the current early-stop stage starts.
+    # Warmup is applied relative to this boundary.
+    early_stop_stage_start_epoch = 1
 
     for epoch in range(1, total_epochs + 1):
         if model == "twostage_dct_diffusion" and twostage_phase == "coarse":
@@ -1620,7 +1635,8 @@ def train(
                 if maybe_save_coarse_model is not None:
                     maybe_save_coarse_model()
                 params = _set_twostage_phase("diffusion")
-                optimizer = torch.optim.Adam(params, lr=learning_rate * 0.1)
+                optimizer = torch.optim.Adam(params, lr=twostage_diffusion_lr)
+                twostage_coarse_diffusion_group_added = False
                 if use_lr_scheduler:
                     scheduler = ReduceLROnPlateau(
                         optimizer,
@@ -1645,7 +1661,31 @@ def train(
                 if early_stop_reset_on_phase_change:
                     early_stop_best = None
                     early_stop_bad_epochs = 0
+                    early_stop_stage_start_epoch = epoch
                 print(f"[Info] Switched to twostage diffusion training for {twostage_diffusion_epochs} epochs.")
+        if (
+            model == "twostage_dct_diffusion"
+            and twostage_phase == "diffusion"
+            and twostage_train_coarse_in_diffusion
+            and not twostage_coarse_diffusion_group_added
+        ):
+            diffusion_stage_epoch = epoch - train_epochs
+            if diffusion_stage_epoch > twostage_diffusion_coarse_warmup_epochs:
+                coarse_params = [p for p in twostage_model.coarse.parameters()]
+                for p in coarse_params:
+                    p.requires_grad = True
+                coarse_params = [p for p in coarse_params if p.requires_grad]
+                if coarse_params:
+                    if optimizer is None:
+                        raise RuntimeError("Optimizer is not initialized for twostage diffusion phase.")
+                    coarse_lr = twostage_diffusion_lr * 0.1
+                    optimizer.add_param_group({"params": coarse_params, "lr": coarse_lr})
+                    twostage_coarse_diffusion_group_added = True
+                    print(
+                        f"[Info] Unfroze coarse module during diffusion at epoch {epoch} "
+                        f"(diffusion_epoch={diffusion_stage_epoch}, warmup={twostage_diffusion_coarse_warmup_epochs}, "
+                        f"coarse_lr={coarse_lr:.6g}, diffusion_lr={twostage_diffusion_lr:.6g})."
+                    )
         _set_mode(True)
         running = 0.0
         score_running = 0.0
@@ -1733,25 +1773,34 @@ def train(
                 if twostage_phase == "diffusion":
                     twostage_mamp_hist_feat = None
                     twostage_mamp_coarse_feat = None
+                    coarse_grad_active = bool(
+                        twostage_train_coarse_in_diffusion and twostage_coarse_diffusion_group_added
+                    )
                     # Cache coarse prediction once per train batch during diffusion phase.
-                    with torch.no_grad():
+                    if coarse_grad_active:
                         coarse_future_for_condition = twostage_model.coarse(in_3d)
+                    else:
+                        with torch.no_grad():
+                            coarse_future_for_condition = twostage_model.coarse(in_3d)
                     if twostage_use_mamp_condition:
                         if cached_mamp_feat is not None:
                             twostage_mamp_hist_feat = cached_mamp_feat.to(device=device).float()
                         else:
                             twostage_mamp_hist_feat = _compute_mamp_feat(in_3d)
                     if twostage_use_mamp_condition_coarse:
+                        # Coarse-conditioned MAMP branch is always computed without gradients.
+                        coarse_for_mamp = coarse_future_for_condition.detach()
                         if cached_mamp_feat_coarse is not None:
                             twostage_mamp_coarse_feat = cached_mamp_feat_coarse.to(device=device).float()
                         else:
-                            twostage_mamp_coarse_feat = _compute_mamp_feat(coarse_future_for_condition)
+                            twostage_mamp_coarse_feat = _compute_mamp_feat(coarse_for_mamp)
                     twostage_mamp_feat = _merge_mamp_features(twostage_mamp_hist_feat, twostage_mamp_coarse_feat)
                     diffusion_loss, coarse_pred = twostage_model.diffusion_loss(
                         in_3d,
                         tgt_3d,
                         mamp_feat=twostage_mamp_feat,
                         coarse_future=coarse_future_for_condition,
+                        allow_coarse_grad=coarse_grad_active,
                     )
                     recons = coarse_pred
                 else:
@@ -1949,12 +1998,13 @@ def train(
         mpjpe_norm_avg = mpjpe_norm_running / max(1, n_seen)
         vel_avg = vel_running / max(1, n_seen)
         diffusion_avg = diffusion_running / max(1, n_seen)
+        objective_train_loss = diffusion_avg if (model == "twostage_dct_diffusion" and twostage_phase == "diffusion") else epoch_loss
         vel_clause = f"| vel_mae={vel_avg:.6f} "
         phase_clause = ""
         if model == "twostage_dct_diffusion":
             phase_clause = f"| phase={twostage_phase} | diff_loss={diffusion_avg:.6f}"
         print(
-            f"[Epoch {epoch:03d}] loss={epoch_loss:.6f} | mpjpe={mpjpe_avg:.6f} | "
+            f"[Epoch {epoch:03d}] loss={objective_train_loss:.6f} | mpjpe={mpjpe_avg:.6f} | "
             f"mpjpe_norm={mpjpe_norm_avg:.6f}{vel_clause}"
             f"{phase_clause} | score(mae-wj)={score_avg:.6f} | time={dt:.1f}s | lr={optimizer.param_groups[0]['lr'] if optimizer is not None else 'n/a'}"
         )
@@ -2005,7 +2055,7 @@ def train(
         if log_wandb and wandb_handle is not None:
             wandb_metrics: Dict[str, float] = {}
             _maybe_add_metric(wandb_metrics, "epoch", float(epoch))
-            _maybe_add_metric(wandb_metrics, "train/loss", epoch_loss)
+            _maybe_add_metric(wandb_metrics, "train/loss", objective_train_loss)
             _maybe_add_metric(wandb_metrics, "train/mpjpe", mpjpe_avg)
             _maybe_add_metric(wandb_metrics, "train/mpjpe_norm", mpjpe_norm_avg)
             _maybe_add_metric(wandb_metrics, "train/weighted_mae", score_avg)
@@ -2034,7 +2084,7 @@ def train(
         else:
             # Step LR scheduler based on training loss if no validation loader
             if scheduler is not None:
-                scheduler.step(float(epoch_loss))
+                scheduler.step(float(objective_train_loss))
 
         if early_stop_enabled:
             if early_stop_monitor == "test_mpjpe":
@@ -2042,35 +2092,37 @@ def train(
             elif early_stop_monitor == "train_mpjpe":
                 monitored = mpjpe_avg
             elif early_stop_monitor in {"train_loss", "loss"}:
-                monitored = epoch_loss
+                monitored = objective_train_loss
             else:
-                monitored = avg_loss if avg_loss is not None else epoch_loss
+                monitored = avg_loss if avg_loss is not None else objective_train_loss
             if monitored is None or not math.isfinite(float(monitored)):
                 print("[EarlyStop] Monitored value is not finite; skipping early-stop check for this epoch.")
-            elif epoch > early_stop_warmup:
-                monitored_f = float(monitored)
-                improved = early_stop_best is None or (monitored_f < (float(early_stop_best) - early_stop_min_delta))
-                if improved:
-                    early_stop_best = monitored_f
-                    early_stop_bad_epochs = 0
-                else:
-                    early_stop_bad_epochs += 1
-                    if early_stop_bad_epochs >= early_stop_patience:
-                        if model == "twostage_dct_diffusion" and twostage_phase == "coarse" and twostage_diffusion_epochs > 0:
-                            train_epochs = epoch
-                            early_stop_best = None
-                            early_stop_bad_epochs = 0
-                            print(
-                                f"[EarlyStop] Coarse stage stopped at epoch {epoch}; "
-                                "switching to twostage diffusion stage."
-                            )
-                        else:
-                            print(
-                                f"[EarlyStop] Stopping at epoch {epoch} "
-                                f"(monitor={early_stop_monitor or 'auto'}, best={early_stop_best:.6f}, "
-                                f"current={monitored_f:.6f}, patience={early_stop_patience}, min_delta={early_stop_min_delta})."
-                            )
-                            break
+            else:
+                early_stop_stage_epoch = epoch - early_stop_stage_start_epoch + 1
+                if early_stop_stage_epoch > early_stop_warmup:
+                    monitored_f = float(monitored)
+                    improved = early_stop_best is None or (monitored_f < (float(early_stop_best) - early_stop_min_delta))
+                    if improved:
+                        early_stop_best = monitored_f
+                        early_stop_bad_epochs = 0
+                    else:
+                        early_stop_bad_epochs += 1
+                        if early_stop_bad_epochs >= early_stop_patience:
+                            if model == "twostage_dct_diffusion" and twostage_phase == "coarse" and twostage_diffusion_epochs > 0:
+                                train_epochs = epoch
+                                early_stop_best = None
+                                early_stop_bad_epochs = 0
+                                print(
+                                    f"[EarlyStop] Coarse stage stopped at epoch {epoch}; "
+                                    "switching to twostage diffusion stage."
+                                )
+                            else:
+                                print(
+                                    f"[EarlyStop] Stopping at epoch {epoch} "
+                                    f"(monitor={early_stop_monitor or 'auto'}, best={early_stop_best:.6f}, "
+                                    f"current={monitored_f:.6f}, patience={early_stop_patience}, min_delta={early_stop_min_delta})."
+                                )
+                                break
 
     last_state = _capture_state()
 

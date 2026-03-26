@@ -210,6 +210,9 @@ def _build_train_cfg(
     cfg.twostage_denoiser_heads = _coerce_optional(best_cfg.get("twostage_denoiser_heads"), int)
     cfg.twostage_dropout = _coerce_optional(best_cfg.get("twostage_dropout"), float)
     cfg.twostage_freeze_coarse = _coerce_optional(best_cfg.get("twostage_freeze_coarse"), bool)
+    cfg.twostage_diffusion_coarse_warmup_epochs = _coerce_optional(
+        best_cfg.get("twostage_diffusion_coarse_warmup_epochs"), int
+    )
     cfg.twostage_cond_use_history = _coerce_optional(best_cfg.get("twostage_cond_use_history"), bool)
     cfg.twostage_cond_use_coarse = _coerce_optional(best_cfg.get("twostage_cond_use_coarse"), bool)
     cfg.twostage_use_mamp_condition = _coerce_optional(best_cfg.get("twostage_use_mamp_condition"), bool)
@@ -220,6 +223,7 @@ def _build_train_cfg(
     cfg.twostage_mamp_mask_ratio = _coerce_optional(best_cfg.get("twostage_mamp_mask_ratio"), float)
     cfg.twostage_mamp_motion_aware_tau = _coerce_optional(best_cfg.get("twostage_mamp_motion_aware_tau"), float)
     cfg.twostage_mpjpe_weight = _coerce_optional(best_cfg.get("twostage_mpjpe_weight"), float)
+    cfg.twostage_x0_loss_weight = _coerce_optional(best_cfg.get("twostage_x0_loss_weight"), float)
     return cfg
 
 

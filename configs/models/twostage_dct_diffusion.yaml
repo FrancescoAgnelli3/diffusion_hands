@@ -4,12 +4,12 @@ train:
   epochs: 100
   early_stopping:
     enabled: true
-    patience: 20
+    patience: 15
     min_delta: 0.0001
-    warmup: 10
-    monitor: auto
+    warmup: 15
+    monitor: train_loss
 defaults:
-  batch_size: 64
+  batch_size: 256
   lr: 0.001
   hidden_size: 128
   gru_layers: 8
@@ -22,14 +22,15 @@ defaults:
   simlpe_mix_spatial_temporal: false
   simlpe_add_last_offset: true
   twostage_k_low: 80
-  twostage_diffusion_epochs: 500
+  twostage_diffusion_epochs: 1
   twostage_diffusion_steps: 10
   twostage_ddim_steps: 10
-  twostage_denoiser_dim: 256
-  twostage_denoiser_depth: 8
+  twostage_denoiser_dim: 128
+  twostage_denoiser_depth: 6
   twostage_denoiser_heads: 4
   twostage_dropout: 0.0
   twostage_freeze_coarse: true
+  twostage_diffusion_coarse_warmup_epochs: 25
   twostage_cond_use_history: false
   twostage_cond_use_coarse: true
   twostage_use_mamp_condition: false
@@ -40,3 +41,4 @@ defaults:
   twostage_mamp_mask_ratio: 0.0
   twostage_mamp_motion_aware_tau: 0.8
   twostage_mpjpe_weight: 0.0
+  twostage_x0_loss_weight: 0.0

@@ -710,7 +710,9 @@ def train(
         n_heads = int(config.get("twostage_denoiser_heads", 8))
         p_drop = float(config.get("twostage_dropout", 0.0))
         freeze_coarse = bool(config.get("twostage_freeze_coarse", True))
-        twostage_train_coarse_in_diffusion = bool(freeze_coarse)
+        # If coarse is frozen, keep it frozen during diffusion.
+        # Only allow diffusion-stage coarse updates when freeze_coarse is false.
+        twostage_train_coarse_in_diffusion = not bool(freeze_coarse)
         twostage_diffusion_coarse_warmup_epochs = max(
             0, int(config.get("twostage_diffusion_coarse_warmup_epochs", 10))
         )

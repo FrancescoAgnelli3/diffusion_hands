@@ -45,7 +45,7 @@ defaults:
     weight_decay: 0
   loss_weight_specs:
     history_weight: 1
-    future_weight: 0.3
+    future_weight: 1
   st_loss_specs:
     loss_weight_scale: 10
   logging_specs: {}

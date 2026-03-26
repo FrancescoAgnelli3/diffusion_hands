@@ -22,8 +22,8 @@ defaults:
   simlpe_mix_spatial_temporal: false
   simlpe_add_last_offset: true
   twostage_k_low: 80
-  twostage_diffusion_epochs: 1
-  twostage_diffusion_steps: 10
+  twostage_diffusion_epochs: 100
+  twostage_diffusion_steps: 20
   twostage_ddim_steps: 10
   twostage_denoiser_dim: 128
   twostage_denoiser_depth: 6
@@ -35,10 +35,5 @@ defaults:
   twostage_cond_use_coarse: true
   twostage_use_mamp_condition: false
   twostage_use_mamp_condition_coarse: false
-  twostage_mamp_checkpoint: ""
-  twostage_mamp_config: ""
-  twostage_mamp_repo_root: ""
-  twostage_mamp_mask_ratio: 0.0
-  twostage_mamp_motion_aware_tau: 0.8
   twostage_mpjpe_weight: 0.0
   twostage_x0_loss_weight: 0.0

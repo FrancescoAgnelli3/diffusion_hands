@@ -30,10 +30,10 @@ from common.preprocessing import default_action_filter
 VENDOR = ROOT / "vendor"
 PYTHON = os.environ.get("DIFFUSION_HANDS_PYTHON", sys.executable)
 DEFAULT_DATA_ROOTS: Dict[str, str] = {
-    "assembly": "/mnt/turing-datasets/AssemblyHands/assembly101-download-scripts/data_our/",
-    "h2o": "/mnt/turing-datasets/h2o/",
-    "bighands": "/mnt/turing-datasets/BigHands/BigHand2.2M/data/",
-    "fpha": "/mnt/turing-datasets/FPHA/data/",
+    "assembly": "/mnt/TuringDatasets/AssemblyHands/assembly101-download-scripts/data_our/",
+    "h2o": "/mnt/TuringDatasets/h2o/",
+    "bighands": "/mnt/TuringDatasets/BigHands/BigHand2.2M/data/",
+    "fpha": "/mnt/TuringDatasets/FPHA/data/",
 }
 DEFAULT_RUNTIME: Dict[str, str] = {
     "output_root": str(ROOT / "results"),
@@ -56,10 +56,38 @@ def _dump_yaml(path: Path, obj: dict) -> None:
         yaml.safe_dump(obj, f, sort_keys=False)
 
 
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dicts(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _run(cmd: List[str], cwd: Path, env: Optional[dict] = None) -> int:
     print(f"[CMD] ({cwd}) {' '.join(cmd)}")
     p = subprocess.run(cmd, cwd=str(cwd), env=env)
     return int(p.returncode)
+
+
+def _gpu_subprocess_env(cfg: dict) -> dict:
+    env = os.environ.copy()
+    gpu_index = int(cfg.get("gpu_index", 0))
+    if gpu_index >= 0:
+        # Restrict each launched backend to a single physical GPU so vendor-specific
+        # device selection code cannot accidentally fall back to GPU 0.
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+    return env
+
+
+def _child_gpu_index(cfg: dict) -> int:
+    gpu_index = int(cfg.get("gpu_index", 0))
+    # Inside a CUDA_VISIBLE_DEVICES-masked subprocess, the requested physical GPU
+    # is exposed as local device 0.
+    return 0 if gpu_index >= 0 else gpu_index
 
 
 def _resolve_model_cfg_entry(model_name: str, entry: object, config_dir: Path) -> dict:
@@ -93,18 +121,28 @@ def _resolve_model_cfg_entry(model_name: str, entry: object, config_dir: Path) -
     if not isinstance(loaded, dict):
         raise ValueError(f"Model config for '{model_name}' must be a mapping.")
     declared = str(loaded.get("model", model_name)).strip().lower()
-    if declared != model_name:
-        raise ValueError(f"Model config mismatch: key '{model_name}' vs model '{declared}'.")
+    base_model = str(entry_overrides.get("base_model", declared)).strip().lower()
+    if declared != base_model:
+        raise ValueError(
+            f"Model config mismatch: entry '{model_name}' declares base_model '{base_model}' "
+            f"but loaded config model is '{declared}'."
+        )
+    if declared != model_name and "base_model" not in entry_overrides:
+        raise ValueError(
+            f"Model config mismatch: key '{model_name}' vs model '{declared}'. "
+            "Use 'base_model' when defining an alias entry."
+        )
     if entry_overrides:
-        loaded = dict(loaded)
-        loaded.update(entry_overrides)
+        loaded = _deep_merge_dicts(dict(loaded), entry_overrides)
     return {
         "model": model_name,
+        "base_model": base_model,
         "enabled": bool(loaded.get("enabled", True)),
         "train": dict(loaded.get("train", {}) or {}),
         "eval": dict(loaded.get("eval", {}) or {}),
         "options": dict(loaded.get("options", {}) or {}),
         "defaults": dict(loaded.get("defaults", {}) or {}),
+        "notes": str(loaded.get("notes", "") or ""),
     }
 
 
@@ -254,15 +292,15 @@ def _resolve_runtime(cfg: dict) -> Dict[str, str]:
     return runtime
 
 
-def run_twostage(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_twostage(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "splineeqnet"
-    mcfg = cfg.get("models", {}).get("twostage_dct_diffusion", {})
+    mcfg = cfg.get("models", {}).get(model_name, {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
-    run_root = wd / "out" / "diffusion_hands_runs" / "twostage_dct_diffusion" / run_id
+    run_root = wd / "out" / "diffusion_hands_runs" / model_name / run_id
     run_root.mkdir(parents=True, exist_ok=True)
     best_cfg = deepcopy(_as_dict(mcfg.get("defaults")))
     if not best_cfg:
-        raise RuntimeError("Missing models.twostage_dct_diffusion.defaults in experiment model YAML.")
+        raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
     best_cfg["model"] = "twostage_dct_diffusion"
     best_cfg["input_n"] = int(pp["input_n"])
     best_cfg["output_n"] = int(pp["output_n"])
@@ -325,6 +363,7 @@ def run_twostage(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
             str(save_root),
         ],
         cwd=wd,
+        env=_gpu_subprocess_env(cfg),
     )
     if rc != 0:
         raise RuntimeError("twostage training failed")
@@ -337,13 +376,13 @@ def run_twostage(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
     return normalize_metrics_dict(row)
 
 
-def run_belfusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_belfusion(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "belfusion"
-    mcfg = cfg.get("models", {}).get("belfusion", {})
+    mcfg = cfg.get("models", {}).get(model_name, {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
-        raise RuntimeError("Missing models.belfusion.defaults in experiment model YAML.")
+        raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
 
     template["seed"] = int(cfg["seed"])
     template.setdefault("data", {})
@@ -404,7 +443,7 @@ def run_belfusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, r
             "--multimodal-threshold",
             str(cfg["humanmac_multimodal_threshold"]),
         ]
-        rc = _run(cmd, cwd=wd)
+        rc = _run(cmd, cwd=wd, env=_gpu_subprocess_env(cfg))
         if rc != 0:
             raise RuntimeError("BeLFusion run failed")
 
@@ -412,15 +451,15 @@ def run_belfusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, r
         return normalize_metrics_dict(row)
 
 
-def run_comusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_comusion(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "comusion"
-    mcfg = cfg.get("models", {}).get("comusion", {})
+    mcfg = cfg.get("models", {}).get(model_name, {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
     cfg_id = f"dh_{run_id}_comusion"
     cfg_path = wd / "cfg" / f"{cfg_id}.yml"
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
-        raise RuntimeError("Missing models.comusion.defaults in experiment model YAML.")
+        raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
     template["t_his"] = int(pp["input_n"])
     template["t_pred"] = int(pp["output_n"])
     template["data_specs"]["dataset"] = str(dataset).lower()
@@ -432,7 +471,11 @@ def run_comusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
     template["data_specs"]["eval_batch_mult"] = int(pp["eval_batch_mult"])
     template["data_specs"]["splineeqnet_root"] = str(VENDOR / "splineeqnet")
     template["eval_sample_num"] = int(cfg["num_candidates"])
-    template["diff_specs"]["div_k"] = int(cfg["num_candidates"])
+    template.setdefault("diff_specs", {})
+    if template["diff_specs"].get("div_k") is None:
+        template["diff_specs"]["div_k"] = int(cfg["num_candidates"])
+    else:
+        template["diff_specs"]["div_k"] = int(template["diff_specs"]["div_k"])
     train_epochs = mcfg.get("train", {}).get("epochs")
     if train_epochs is not None:
         tepoch = int(train_epochs)
@@ -464,9 +507,10 @@ def run_comusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
             "--seed",
             str(cfg["seed"]),
             "--gpu_index",
-            str(cfg["gpu_index"]),
+            str(_child_gpu_index(cfg)),
         ],
         cwd=wd,
+        env=_gpu_subprocess_env(cfg),
     )
     if rc != 0:
         raise RuntimeError("CoMusion run failed")
@@ -484,15 +528,15 @@ def run_comusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
     return normalize_metrics_dict(row)
 
 
-def run_dlow_cvae(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_dlow_cvae(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "dlow"
-    mcfg = cfg.get("models", {}).get("dlow_cvae", {})
+    mcfg = cfg.get("models", {}).get(model_name, {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
     cfg_id = f"dh_{run_id}_dlow_cvae"
     cfg_path = wd / "motion_pred" / "cfg" / f"{cfg_id}.yml"
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
-        raise RuntimeError("Missing models.dlow_cvae.defaults in experiment model YAML.")
+        raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
     template["dataset"] = str(dataset).lower()
     template["data_dir"] = str(data_dir)
     template["action_filter"] = str(action_filter)
@@ -537,7 +581,7 @@ def run_dlow_cvae(dataset: str, data_dir: Path, action_filter: str, cfg: dict, r
             "--seed",
             str(cfg["seed"]),
             "--gpu_index",
-            str(cfg["gpu_index"]),
+            str(_child_gpu_index(cfg)),
             "--eval_after_train",
             "--eval_sample_num",
             str(cfg["num_candidates"]),
@@ -545,6 +589,7 @@ def run_dlow_cvae(dataset: str, data_dir: Path, action_filter: str, cfg: dict, r
             str(cfg["humanmac_multimodal_threshold"]),
         ],
         cwd=wd,
+        env=_gpu_subprocess_env(cfg),
     )
     if rc != 0:
         raise RuntimeError("DLow CVAE training failed")
@@ -570,15 +615,15 @@ def run_dlow_cvae(dataset: str, data_dir: Path, action_filter: str, cfg: dict, r
     return normalize_metrics_dict(out)
 
 
-def run_humanmac(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_humanmac(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "humanmac"
-    mcfg = cfg.get("models", {}).get("humanmac", {})
+    mcfg = cfg.get("models", {}).get(model_name, {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
     cfg_id = f"dh_{run_id}_humanmac"
     cfg_path = wd / "cfg" / f"{cfg_id}.yml"
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
-        raise RuntimeError("Missing models.humanmac.defaults in experiment model YAML.")
+        raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
     template["dataset"] = str(dataset).lower()
     template["data_dir"] = str(data_dir)
     template["action_filter"] = str(action_filter)
@@ -653,6 +698,7 @@ def run_humanmac(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
             str(es_monitor),
         ],
         cwd=wd,
+        env=_gpu_subprocess_env(cfg),
     )
     if rc != 0:
         raise RuntimeError("HumanMAC run failed")
@@ -695,18 +741,18 @@ def run_humanmac(dataset: str, data_dir: Path, action_filter: str, cfg: dict, ru
     return normalize_metrics_dict(out)
 
 
-def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_skeletondiffusion(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "skeletondiffusion"
-    mcfg = cfg.get("models", {}).get("skeletondiffusion", {})
+    mcfg = cfg.get("models", {}).get(model_name, {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
-    run_root = wd / "out" / "diffusion_hands_runs" / f"skeletondiffusion_{run_id}"
+    run_root = wd / "out" / "diffusion_hands_runs" / f"{model_name}_{run_id}"
     if run_root.exists():
         shutil.rmtree(run_root, ignore_errors=True)
     run_root.mkdir(parents=True, exist_ok=True)
     train_cfg = mcfg.get("train", {})
     defaults = _as_dict(mcfg.get("defaults"))
     if not defaults:
-        raise RuntimeError("Missing models.skeletondiffusion.defaults in experiment model YAML.")
+        raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
     auto_defaults = _as_dict(defaults.get("train_autoencoder"))
     diff_defaults = _as_dict(defaults.get("train_diffusion"))
     eval_defaults = _as_dict(defaults.get("eval"))
@@ -768,7 +814,7 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
             *(["++model.early_stopping_monitor=%s" % str(auto_es_cfg.get("monitor", "train_loss"))] if auto_es_cfg else []),
         ]
     )
-    rc = _run(auto_cmd, cwd=wd)
+    rc = _run(auto_cmd, cwd=wd, env=_gpu_subprocess_env(cfg))
     if rc != 0:
         raise RuntimeError("skeletondiffusion autoencoder training failed")
 
@@ -796,7 +842,7 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
             *(["++model.early_stopping_monitor=%s" % str(diff_es_cfg.get("monitor", "train_loss"))] if diff_es_cfg else []),
         ]
     )
-    rc = _run(diff_cmd, cwd=wd)
+    rc = _run(diff_cmd, cwd=wd, env=_gpu_subprocess_env(cfg))
     if rc != 0:
         raise RuntimeError("skeletondiffusion diffusion training failed")
 
@@ -845,7 +891,7 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
             f"seed={cfg['seed']}",
         ]
     )
-    rc = _run(eval_cmd, cwd=wd)
+    rc = _run(eval_cmd, cwd=wd, env=_gpu_subprocess_env(cfg))
     if rc != 0:
         raise RuntimeError("skeletondiffusion eval failed")
 
@@ -857,16 +903,16 @@ def run_skeletondiffusion(dataset: str, data_dir: Path, action_filter: str, cfg:
     return normalize_metrics_dict({k: float(v) for k, v in row.items() if isinstance(v, (int, float))})
 
 
-def run_gsps(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
+def run_gsps(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "gsps"
-    mcfg = cfg.get("models", {}).get("gsps", {})
+    mcfg = cfg.get("models", {}).get(model_name, {})
     pp = _as_dict(cfg.get("_shared_preprocessing"))
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
-        raise RuntimeError("Missing models.gsps.defaults in experiment model YAML.")
+        raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
 
     template["seed"] = int(cfg["seed"])
-    template["gpu_index"] = int(cfg["gpu_index"])
+    template["gpu_index"] = int(_child_gpu_index(cfg))
     template["dataset"] = str(dataset).lower()
     template["data_dir"] = str(data_dir)
     template["action_filter"] = str(action_filter)
@@ -930,7 +976,7 @@ def run_gsps(dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id
         template["runtime"]["metrics_csv"] = str(out_eval)
         _dump_yaml(cfg_path, template)
 
-        rc = _run([PYTHON, "run_gsps.py", "--config", str(cfg_path)], cwd=wd)
+        rc = _run([PYTHON, "run_gsps.py", "--config", str(cfg_path)], cwd=wd, env=_gpu_subprocess_env(cfg))
         if rc != 0:
             raise RuntimeError("GSPS run failed")
 
@@ -993,15 +1039,15 @@ def main() -> None:
     _cleanup_legacy_result_artifacts(out_root)
     print(f"[PREPROCESSING] shared={cfg['_shared_preprocessing']}")
 
-    runners = [
-        ("twostage_dct_diffusion", run_twostage),
-        ("belfusion", run_belfusion),
-        ("comusion", run_comusion),
-        ("dlow_cvae", run_dlow_cvae),
-        ("humanmac", run_humanmac),
-        ("skeletondiffusion", run_skeletondiffusion),
-        ("gsps", run_gsps),
-    ]
+    runners = {
+        "twostage_dct_diffusion": run_twostage,
+        "belfusion": run_belfusion,
+        "comusion": run_comusion,
+        "dlow_cvae": run_dlow_cvae,
+        "humanmac": run_humanmac,
+        "skeletondiffusion": run_skeletondiffusion,
+        "gsps": run_gsps,
+    }
     for dataset in datasets:
         configured_action_filter = str(cfg.get("action_filter", ""))
         # Apply action_filter only to assembly; keep other datasets unfiltered.
@@ -1011,25 +1057,33 @@ def main() -> None:
 
         print(f"[DATASET] starting dataset={dataset} action_filter={action_filter!r} data_dir={data_dir}")
 
-        for model_name, fn in runners:
-            if not bool(cfg.get("models", {}).get(model_name, {}).get("enabled", False)):
+        for model_name, model_cfg in cfg.get("models", {}).items():
+            if not bool(model_cfg.get("enabled", False)):
                 continue
+            base_model = str(model_cfg.get("base_model", model_name)).strip().lower()
+            fn = runners.get(base_model)
+            if fn is None:
+                raise ValueError(
+                    f"Unsupported base_model '{base_model}' for models.{model_name}. "
+                    f"Supported models: {sorted(runners)}"
+                )
             row: Dict[str, object] = {
                 "timestamp": _now(),
                 "dataset": dataset,
                 "action_filter": action_filter,
                 "model": model_name,
                 "status": "ok",
-                "notes": "",
+                "notes": str(model_cfg.get("notes", "") or ""),
                 **{k: float("nan") for k in CANONICAL_METRIC_KEYS},
             }
             try:
-                metrics = fn(dataset, data_dir, action_filter, cfg, run_id)
+                metrics = fn(model_name, dataset, data_dir, action_filter, cfg, run_id)
                 row.update(metrics)
                 print(f"[{dataset}:{model_name}] metrics={metrics}")
             except Exception as exc:
                 row["status"] = "failed"
-                row["notes"] = str(exc)
+                prefix = str(model_cfg.get("notes", "") or "").strip()
+                row["notes"] = f"{prefix} | {exc}" if prefix else str(exc)
                 print(f"[{dataset}:{model_name}] FAILED: {exc}")
             _append_long_csv(aggregate_csv, row)
 

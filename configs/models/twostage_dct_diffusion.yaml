@@ -9,31 +9,31 @@ train:
     warmup: 15
     monitor: train_loss
 defaults:
-  batch_size: 256
+  batch_size: 512
   lr: 0.001
   hidden_size: 128
   gru_layers: 8
   gradient_clip: 0
   bone_loss_weight: 0.0
-  dct_keep_coeffs: 80
   simlpe_norm_axis: all
   simlpe_use_norm: true
   simlpe_use_spatial_fc_only: false
   simlpe_mix_spatial_temporal: false
   simlpe_add_last_offset: true
-  twostage_k_low: 80
-  twostage_diffusion_epochs: 100
-  twostage_diffusion_steps: 20
-  twostage_ddim_steps: 10
+  twostage_k_low: 60
+  twostage_diffusion_epochs: 200
+  twostage_diffusion_steps: 50
+  twostage_ddim_steps: 25
   twostage_denoiser_dim: 128
   twostage_denoiser_depth: 6
   twostage_denoiser_heads: 4
   twostage_dropout: 0.0
-  twostage_freeze_coarse: true
+  twostage_freeze_coarse: false
   twostage_diffusion_coarse_warmup_epochs: 25
+  twostage_allow_no_conditioning: false
   twostage_cond_use_history: false
   twostage_cond_use_coarse: true
   twostage_use_mamp_condition: false
   twostage_use_mamp_condition_coarse: false
   twostage_mpjpe_weight: 0.0
-  twostage_x0_loss_weight: 0.0
+  twostage_coarse_target_lowpass_only: false

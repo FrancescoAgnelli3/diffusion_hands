@@ -61,6 +61,7 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_diffusion_coarse_warmup_epochs": 10,
         "twostage_cond_use_history": False,
         "twostage_cond_use_coarse": True,
+        "twostage_allow_no_conditioning": False,
         "twostage_use_mamp_condition": False,
         "twostage_use_mamp_condition_coarse": False,
         "twostage_mamp_checkpoint": "",
@@ -69,7 +70,7 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_mamp_mask_ratio": 0.0,
         "twostage_mamp_motion_aware_tau": 0.80,
         "twostage_mpjpe_weight": 0.0,
-        "twostage_x0_loss_weight": 0.0,
+        "twostage_coarse_target_lowpass_only": False,
         "epochs": 50,
         "early_stopping_enabled": True,
         "early_stopping_patience": 20,
@@ -141,6 +142,7 @@ class TrainCfg:
     twostage_diffusion_coarse_warmup_epochs: Optional[int] = None
     twostage_cond_use_history: Optional[bool] = None
     twostage_cond_use_coarse: Optional[bool] = None
+    twostage_allow_no_conditioning: Optional[bool] = None
     twostage_use_mamp_condition: Optional[bool] = None
     twostage_use_mamp_condition_coarse: Optional[bool] = None
     twostage_mamp_checkpoint: Optional[str] = None
@@ -149,7 +151,14 @@ class TrainCfg:
     twostage_mamp_mask_ratio: Optional[float] = None
     twostage_mamp_motion_aware_tau: Optional[float] = None
     twostage_mpjpe_weight: Optional[float] = None
-    twostage_x0_loss_weight: Optional[float] = None
+    twostage_coarse_target_lowpass_only: Optional[bool] = None
+    twostage_mobility_palm_var: Optional[float] = None
+    twostage_mobility_depth1_var: Optional[float] = None
+    twostage_mobility_depth2_var: Optional[float] = None
+    twostage_mobility_depth3plus_var: Optional[float] = None
+    twostage_graph_edge_strength: Optional[float] = None
+    twostage_graph_two_hop_strength: Optional[float] = None
+    twostage_covariance_jitter: Optional[float] = None
 
 
 def parse_list(arg: str, cast):

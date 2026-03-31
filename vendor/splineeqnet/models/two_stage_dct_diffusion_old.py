@@ -13,8 +13,8 @@ Drop-in replacement for `two_stage_dct_diffusion.py`, keeping the same public AP
 
 Stage A (coarse): predicts low-frequency DCT content and reconstructs coarse future in time domain.
 Stage B (refiner): conditional diffusion over time-domain residual r = y_gt - y_coarse.
-Diffusion is trained and sampled in NORMALIZED residual space using EMA RMS scale s:
-    x0 = r / s
+Diffusion is trained and sampled directly in residual space:
+    x0 = r
 
 Denoiser predicts v (v-pred):
     x_t = sqrt(ab) * x0 + sqrt(1-ab) * eps
@@ -114,10 +114,6 @@ class TwoStageDCTDiffusionConfig:
     stopgrad_coarse_condition: bool = True  # stop-grad coarse conditioning into diffusion during training
     cond_use_history: bool = True
     cond_use_coarse: bool = True
-
-    # Residual normalization (EMA RMS)
-    residual_ema_decay: float = 0.99
-    residual_rms_eps: float = 1e-6
 
     # Sampling stabilizers
     x0_clip: float = 0  # clip x0_hat in normalized space (0 disables)
@@ -610,9 +606,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
         self.cfg = cfg
         self.schedule = DiffusionSchedule(cfg.diffusion_steps, cfg.beta_schedule)
 
-        # Keep EMA in fp32 for numerical stability
-        self.register_buffer("ema_rms", torch.tensor(1.0, dtype=torch.float32))
-
         self.denoiser = MRTimeTransformerDenoiser(
             in_feat=cfg.feature_dim,
             t_in=cfg.input_length,
@@ -634,24 +627,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
             self.schedule.sqrt_one_minus_alpha_bars.to(device=device, dtype=dtype),
         )
 
-    def _residual_scale(self, residual_gt: torch.Tensor) -> torch.Tensor:
-        """
-        Returns scalar s (fp32) on residual_gt.device.
-        Updates EMA during training using detached residual RMS.
-        """
-        eps = float(self.cfg.residual_rms_eps)
-        decay = float(self.cfg.residual_ema_decay)
-
-        batch_rms = residual_gt.detach().float().pow(2).mean().sqrt()  # fp32 scalar on device
-        if self.training:
-            self.ema_rms.mul_(decay).add_(
-                batch_rms.to(device=self.ema_rms.device, dtype=self.ema_rms.dtype),
-                alpha=1.0 - decay,
-            )
-
-        s = torch.clamp(self.ema_rms.to(device=residual_gt.device), min=eps)  # fp32
-        return s
-
     def training_loss(
         self,
         *,
@@ -663,9 +638,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
         B = residual_gt.size(0)
         _assert_shape(residual_gt, (B, self.cfg.pred_length, self.cfg.feature_dim), "residual_gt")
 
-        # Normalize residual: x0 = r / s  (work in fp32 for stability)
-        s = self._residual_scale(residual_gt)  # fp32 scalar
-        x0 = residual_gt.float() / s
+        x0 = residual_gt.float()
 
         device = residual_gt.device
         alpha_bars, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._schedule_tensors(device, x0.dtype)
@@ -704,8 +677,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
     ) -> torch.Tensor:
         """
         DDIM sampling for residual sequence in data units.
-
-        Sampling is done in normalized space; final output is multiplied by s.
         """
         if steps is None:
             steps = self.cfg.ddim_steps
@@ -718,10 +689,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
         gen = torch.Generator(device=device)
         gen.manual_seed(int(seed))
 
-        # Use EMA scale (fp32) without updating
-        s = torch.clamp(self.ema_rms.to(device=device), min=float(self.cfg.residual_rms_eps))  # fp32 scalar
-
-        # Sample in normalized space (fp32 core)
         x = torch.randn(
             (B, self.cfg.pred_length, self.cfg.feature_dim),
             device=device,
@@ -834,7 +801,7 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
         coarse_future: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute diffusion training loss (v-pred in normalized residual space) and return coarse prediction for logging.
+        Compute diffusion training loss (v-pred in residual space) and return coarse prediction for logging.
         Signature unchanged for your training code.
         """
         history_flat = self._flat_history(history)

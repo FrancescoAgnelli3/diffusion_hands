@@ -100,6 +100,8 @@ def run_experiment(
         tag += f"__twsteps={int(train_cfg.twostage_diffusion_steps)}"
     if train_cfg.twostage_ddim_steps is not None:
         tag += f"__twddim={int(train_cfg.twostage_ddim_steps)}"
+    if train_cfg.twostage_coarse_target_lowpass_only is not None:
+        tag += f"__twlpgt={int(train_cfg.twostage_coarse_target_lowpass_only)}"
 
     config = {
         "batch_size": int(ds.batch_size),
@@ -193,6 +195,7 @@ def run_experiment(
         ("twostage_diffusion_coarse_warmup_epochs", train_cfg.twostage_diffusion_coarse_warmup_epochs, int),
         ("twostage_cond_use_history", train_cfg.twostage_cond_use_history, bool),
         ("twostage_cond_use_coarse", train_cfg.twostage_cond_use_coarse, bool),
+        ("twostage_allow_no_conditioning", train_cfg.twostage_allow_no_conditioning, bool),
         ("twostage_use_mamp_condition", train_cfg.twostage_use_mamp_condition, bool),
         ("twostage_use_mamp_condition_coarse", train_cfg.twostage_use_mamp_condition_coarse, bool),
         ("twostage_mamp_checkpoint", train_cfg.twostage_mamp_checkpoint, str),
@@ -201,7 +204,14 @@ def run_experiment(
         ("twostage_mamp_mask_ratio", train_cfg.twostage_mamp_mask_ratio, float),
         ("twostage_mamp_motion_aware_tau", train_cfg.twostage_mamp_motion_aware_tau, float),
         ("twostage_mpjpe_weight", train_cfg.twostage_mpjpe_weight, float),
-        ("twostage_x0_loss_weight", train_cfg.twostage_x0_loss_weight, float),
+        ("twostage_coarse_target_lowpass_only", train_cfg.twostage_coarse_target_lowpass_only, bool),
+        ("twostage_mobility_palm_var", train_cfg.twostage_mobility_palm_var, float),
+        ("twostage_mobility_depth1_var", train_cfg.twostage_mobility_depth1_var, float),
+        ("twostage_mobility_depth2_var", train_cfg.twostage_mobility_depth2_var, float),
+        ("twostage_mobility_depth3plus_var", train_cfg.twostage_mobility_depth3plus_var, float),
+        ("twostage_graph_edge_strength", train_cfg.twostage_graph_edge_strength, float),
+        ("twostage_graph_two_hop_strength", train_cfg.twostage_graph_two_hop_strength, float),
+        ("twostage_covariance_jitter", train_cfg.twostage_covariance_jitter, float),
     ]
     for key, value, caster in twostage_fields:
         if value is not None:

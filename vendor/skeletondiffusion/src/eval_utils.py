@@ -1,16 +1,23 @@
 import torch
 import os
+import math
 from torch.utils.data import DataLoader
 
 from .utils.config import init_obj
 from .data import create_skeleton
 from .data.loaders import custom_collate_for_mmgt
-from .metrics.utils import get_best_sample_idx
-import src.data.loaders as dataset_type
+from .config_metrics import get_best_sample_idx as _get_best_sample_idx
+from .data import loaders as dataset_type
 
 
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+
+
+def get_best_sample(pred, target):
+    best_idx = _get_best_sample_idx(pred, target)
+    batch_idx = torch.arange(pred.shape[0], device=pred.device)
+    return pred[batch_idx, best_idx], (batch_idx, best_idx)
 
 
 def prepare_eval_dataset(config, split, shuffle=False, augmentation=0, da_mirroring=0, da_rotations=0, drop_last=False, num_workers=None, batch_size=None ,dataset=None, stats_mode="probabilistic", **kwargs):
@@ -56,7 +63,7 @@ def long_term_prediction_best_every50(data, target, extra, get_prediction, proce
                                                                         pred_dict={'pred': pred, 'obs': new_data})
         if idx == 0:
             data = data_metric_space
-        best_pred, indeces_bool = get_best_sample_idx(pred, target_m)
+        best_pred, indeces_bool = get_best_sample(pred, target_m)
         final_pred_data.append(best_pred)
         final_target_data.append(target_m)
         new_data = pred[indeces_bool][..., -n_past_frames:, :, :] # cut off the first frames

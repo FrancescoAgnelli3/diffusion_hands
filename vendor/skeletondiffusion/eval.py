@@ -13,8 +13,7 @@ from ignite.engine import Events, Engine
 from ignite.contrib.handlers import ProgressBar
 
 from src.utils.reproducibility import set_seed
-from src.metrics.utils import draw_table
-from src.config_metrics import attach_engine_to_metrics
+from src.config_metrics import attach_engine_to_metrics, draw_table
 from src.utils.config import merge_cfg, flat_hydra_config
 from src.utils.store import SequenceStorer
 from src.utils.time import AverageTimer

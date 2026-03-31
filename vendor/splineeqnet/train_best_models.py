@@ -215,6 +215,9 @@ def _build_train_cfg(
     )
     cfg.twostage_cond_use_history = _coerce_optional(best_cfg.get("twostage_cond_use_history"), bool)
     cfg.twostage_cond_use_coarse = _coerce_optional(best_cfg.get("twostage_cond_use_coarse"), bool)
+    cfg.twostage_allow_no_conditioning = _coerce_optional(
+        best_cfg.get("twostage_allow_no_conditioning"), bool
+    )
     cfg.twostage_use_mamp_condition = _coerce_optional(best_cfg.get("twostage_use_mamp_condition"), bool)
     cfg.twostage_use_mamp_condition_coarse = _coerce_optional(best_cfg.get("twostage_use_mamp_condition_coarse"), bool)
     cfg.twostage_mamp_checkpoint = _coerce_optional(best_cfg.get("twostage_mamp_checkpoint"), str)
@@ -223,7 +226,16 @@ def _build_train_cfg(
     cfg.twostage_mamp_mask_ratio = _coerce_optional(best_cfg.get("twostage_mamp_mask_ratio"), float)
     cfg.twostage_mamp_motion_aware_tau = _coerce_optional(best_cfg.get("twostage_mamp_motion_aware_tau"), float)
     cfg.twostage_mpjpe_weight = _coerce_optional(best_cfg.get("twostage_mpjpe_weight"), float)
-    cfg.twostage_x0_loss_weight = _coerce_optional(best_cfg.get("twostage_x0_loss_weight"), float)
+    cfg.twostage_coarse_target_lowpass_only = _coerce_optional(
+        best_cfg.get("twostage_coarse_target_lowpass_only"), bool
+    )
+    cfg.twostage_mobility_palm_var = _coerce_optional(best_cfg.get("twostage_mobility_palm_var"), float)
+    cfg.twostage_mobility_depth1_var = _coerce_optional(best_cfg.get("twostage_mobility_depth1_var"), float)
+    cfg.twostage_mobility_depth2_var = _coerce_optional(best_cfg.get("twostage_mobility_depth2_var"), float)
+    cfg.twostage_mobility_depth3plus_var = _coerce_optional(best_cfg.get("twostage_mobility_depth3plus_var"), float)
+    cfg.twostage_graph_edge_strength = _coerce_optional(best_cfg.get("twostage_graph_edge_strength"), float)
+    cfg.twostage_graph_two_hop_strength = _coerce_optional(best_cfg.get("twostage_graph_two_hop_strength"), float)
+    cfg.twostage_covariance_jitter = _coerce_optional(best_cfg.get("twostage_covariance_jitter"), float)
     return cfg
 
 

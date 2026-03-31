@@ -13,19 +13,13 @@ Drop-in replacement for `two_stage_dct_diffusion.py`, keeping the same public AP
 
 Stage A (coarse): predicts low-frequency DCT content and reconstructs coarse future in time domain.
 Stage B (refiner): conditional diffusion over time-domain residual r = y_gt - y_coarse.
-Diffusion is trained and sampled in NORMALIZED residual space using EMA RMS scale s:
-    x0 = r / s
+Diffusion is trained and sampled directly in residual space:
+    x0 = r
 
 Denoiser predicts v (v-pred):
     x_t = sqrt(ab) * x0 + sqrt(1-ab) * eps
     v   = sqrt(ab) * eps - sqrt(1-ab) * x0
 This avoids the unstable division by sqrt(ab) used by epsilon-pred when computing x0 at high noise.
-
-CFG (Classifier-Free Guidance) over coarse conditioning:
-    During training, coarse_free is replaced with a learned null token with probability
-    cfg_p_drop (per sample). At inference, a double forward pass is run:
-        v_guided = (1 + w) * v_cond - w * v_uncond
-    with w = cfg_guidance_weight. w=0 recovers pure conditional; w<0 increases diversity.
 
 This file assumes your project already provides:
 - models.simlpe_dct.SiMLPeConfig, SiMLPeBackbone, _build_dct_matrix
@@ -120,11 +114,8 @@ class TwoStageDCTDiffusionConfig:
     stopgrad_coarse_condition: bool = True
     cond_use_history: bool = True
     cond_use_coarse: bool = True
-    x0_loss_weight: float = 0.0
-
-    # Residual normalization (EMA RMS)
-    residual_ema_decay: float = 0.99
-    residual_rms_eps: float = 1e-6
+    allow_no_conditioning: bool = False
+    coarse_target_lowpass_only: bool = False
 
     # Sampling stabilizers
     x0_clip: float = 0  # clip x0_hat in normalized space (0 disables)
@@ -137,16 +128,6 @@ class TwoStageDCTDiffusionConfig:
     graph_edge_strength: float = 0.22
     graph_two_hop_strength: float = 0.05
     covariance_jitter: float = 1e-4
-
-    # CFG
-    # Probability of replacing coarse conditioning with the null token during training.
-    # Recommended range: 0.10 – 0.15.
-    cfg_p_drop: float = 0.10
-    # Guidance weight w used at inference.
-    #   w = 0.0  -> pure conditional (no diversity boost, best accuracy)
-    #   w < 0.0  -> suppresses conditioning, increases APD at the cost of MPJPE
-    #   w > 0.0  -> sharpens conditioning, decreases APD
-    cfg_guidance_weight: float = 0.0
 
     @property
     def total_length(self) -> int:
@@ -224,6 +205,20 @@ class CoarseDCTForecaster(nn.Module):
         if self.cfg.simlpe_add_last_offset:
             future = future + history[:, -1:, :, :]
         return future
+
+    def lowpass_future_target(self, history: torch.Tensor, future: torch.Tensor) -> torch.Tensor:
+        _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
+        _assert_shape(future, (history.size(0), self.cfg.pred_length, self.cfg.num_nodes, 3), "future")
+        full = torch.cat([history, future], dim=1).reshape(history.size(0), self.cfg.total_length, -1)
+        dct_low = self._dct_low.unsqueeze(0).to(device=full.device, dtype=full.dtype)
+        idct_low = self._idct_low.unsqueeze(0).to(device=full.device, dtype=full.dtype)
+        seq_low = torch.matmul(idct_low, torch.matmul(dct_low, full))
+        future_low = seq_low[:, -self.cfg.pred_length :, :].reshape(
+            history.size(0), self.cfg.pred_length, self.cfg.num_nodes, 3
+        )
+        if self.cfg.simlpe_add_last_offset:
+            future_low = future_low + history[:, -1:, :, :]
+        return future_low
 
 
 # ----------------------------- Diffusion scheduler ----------------------------
@@ -350,6 +345,9 @@ class _TemporalCrossAttentionBlock(nn.Module):
                 f"memory shape mismatch: expected joint dim {N} and feature dim {D}, "
                 f"got {(B, T_mem, N_mem, D_mem)}"
             )
+        if T_mem == 0:
+            x = x + self.mlp(self.norm2(x))
+            return x
         q = self.norm_q(x).permute(0, 2, 1, 3).reshape(B * N, T_out, D)
         m = self.norm_m(memory).permute(0, 2, 1, 3).reshape(B * N, T_mem, D)
         y, _ = self.attn(q, m, m, need_weights=False)
@@ -387,18 +385,7 @@ class _FactorizedSTBlock(nn.Module):
 
 
 class MRTimeTransformerDenoiser(nn.Module):
-    """
-    Factorized spatio-temporal denoiser with explicit joint tokens and CFG support.
-
-    A learned null token `coarse_null_token` of shape (1, 1, num_nodes, d_model),
-    initialized to zero, is used to replace the coarse conditioning during
-    classifier-free guidance training and the unconditional branch at inference.
-
-    The null token lives in projected space (after proj_coarse), so it is a
-    d_model-dimensional vector broadcast over (T_out, N). This means it does not
-    encode any coarse trajectory information and the denoiser must rely solely on
-    history to produce a prediction, which trains the unconditional prior.
-    """
+    """Factorized spatio-temporal denoiser with explicit joint tokens."""
 
     def __init__(
         self,
@@ -412,6 +399,7 @@ class MRTimeTransformerDenoiser(nn.Module):
         dropout: float,
         cond_use_history: bool = True,
         cond_use_coarse: bool = True,
+        allow_no_conditioning: bool = False,
     ) -> None:
         super().__init__()
         self.in_feat = int(in_feat)
@@ -420,6 +408,7 @@ class MRTimeTransformerDenoiser(nn.Module):
         self.d_model = int(d_model)
         self.cond_use_history = bool(cond_use_history)
         self.cond_use_coarse = bool(cond_use_coarse)
+        self.allow_no_conditioning = bool(allow_no_conditioning)
 
         if self.in_feat % 3 != 0:
             raise ValueError(f"in_feat must be divisible by 3, got {self.in_feat}")
@@ -435,10 +424,6 @@ class MRTimeTransformerDenoiser(nn.Module):
         self.pos_coarse_time = nn.Parameter(torch.zeros(1, t_out, 1, d_model))
         self.pos_joint = nn.Parameter(torch.zeros(1, 1, self.num_nodes, d_model))
         self.pos_mamp = nn.Parameter(torch.zeros(1, 1, d_model))
-
-        # CFG null token: learned, initialized to zero, shape (1, 1, num_nodes, d_model).
-        # Broadcast over the T_out dimension to replace the projected coarse memory tokens.
-        self.coarse_null_token = nn.Parameter(torch.zeros(1, 1, self.num_nodes, d_model))
 
         self.t_embed = nn.Sequential(
             nn.Linear(d_model, d_model),
@@ -469,7 +454,6 @@ class MRTimeTransformerDenoiser(nn.Module):
         nn.init.normal_(self.pos_coarse_time, std=0.02)
         nn.init.normal_(self.pos_joint, std=0.02)
         nn.init.normal_(self.pos_mamp, std=0.02)
-        # coarse_null_token is intentionally left at zero init.
 
     def _flat_to_joint_tokens(self, x: torch.Tensor, T: int, name: str) -> torch.Tensor:
         B = x.size(0)
@@ -513,10 +497,6 @@ class MRTimeTransformerDenoiser(nn.Module):
         history: torch.Tensor,        # (B, T_in, F)
         coarse_future: torch.Tensor,  # (B, T_out, F)
         mamp_feat: Optional[torch.Tensor] = None,
-        use_null_coarse: bool = False,
-        # When True the coarse conditioning tokens are replaced with the null token,
-        # implementing the unconditional branch of CFG. This flag is set by the
-        # diffusion module during both training (dropout) and inference (double pass).
     ) -> torch.Tensor:
         B = x_noisy.size(0)
         _assert_shape(x_noisy, (B, self.t_out, self.in_feat), "x_noisy")
@@ -534,14 +514,10 @@ class MRTimeTransformerDenoiser(nn.Module):
             h_hist = self.proj_hist(history_j) + self.pos_hist_time + self.pos_joint
             memory_parts.append(h_hist)
         if self.cond_use_coarse:
-            if use_null_coarse:
-                # Replace coarse tokens with the null token broadcast over (B, T_out, N, D).
-                h_coarse = self.coarse_null_token.expand(B, self.t_out, self.num_nodes, self.d_model)
-            else:
-                h_coarse = self.proj_coarse(coarse_j) + self.pos_coarse_time + self.pos_joint
+            h_coarse = self.proj_coarse(coarse_j) + self.pos_coarse_time + self.pos_joint
             memory_parts.append(h_coarse)
 
-        if not memory_parts and mamp_feat is None:
+        if not memory_parts and mamp_feat is None and not self.allow_no_conditioning:
             raise ValueError("No conditioning enabled.")
 
         if memory_parts:
@@ -737,8 +713,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
         self.register_buffer("cov_base", cov.to(torch.float32), persistent=True)
         self.register_buffer("cov_base_chol", chol.to(torch.float32), persistent=True)
         self.register_buffer("cov_base_inv_chol", inv_chol.to(torch.float32), persistent=True)
-        self.register_buffer("ema_rms", torch.ones(self.num_free_nodes, dtype=torch.float32))
-
         self.denoiser = MRTimeTransformerDenoiser(
             in_feat=self.free_feature_dim,
             t_in=cfg.input_length,
@@ -749,6 +723,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
             dropout=cfg.dropout,
             cond_use_history=cfg.cond_use_history,
             cond_use_coarse=cfg.cond_use_coarse,
+            allow_no_conditioning=cfg.allow_no_conditioning,
         )
 
     def _select_free_joints(self, x: torch.Tensor, T: int, name: str) -> torch.Tensor:
@@ -776,38 +751,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
             self.schedule.sqrt_one_minus_alpha_bars.to(device=device, dtype=dtype),
         )
 
-    def _residual_scale(self, residual_gt: torch.Tensor) -> torch.Tensor:
-        eps = float(self.cfg.residual_rms_eps)
-        decay = float(self.cfg.residual_ema_decay)
-        B = residual_gt.size(0)
-        _assert_shape(residual_gt, (B, self.cfg.pred_length, self.free_feature_dim), "residual_gt_free")
-        residual_joint = residual_gt.detach().float().reshape(B, self.cfg.pred_length, self.num_free_nodes, 3)
-        batch_rms = residual_joint.pow(2).mean(dim=(0, 1, 3)).sqrt()
-        if self.training:
-            self.ema_rms.mul_(decay).add_(
-                batch_rms.to(device=self.ema_rms.device, dtype=self.ema_rms.dtype),
-                alpha=1.0 - decay,
-            )
-        s_joint = torch.clamp(self.ema_rms.to(device=residual_gt.device), min=eps)
-        s = s_joint.view(1, 1, self.num_free_nodes, 1).expand(1, 1, self.num_free_nodes, 3)
-        s = s.reshape(1, 1, self.free_feature_dim)
-        return s
-
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs,
-    ):
-        key = prefix + "ema_rms"
-        if key in state_dict:
-            incoming = state_dict[key]
-            if torch.is_tensor(incoming):
-                if incoming.ndim == 0:
-                    state_dict[key] = incoming.expand(self.num_free_nodes).clone()
-                elif incoming.ndim == 1 and incoming.numel() == 1 and self.num_free_nodes > 1:
-                    state_dict[key] = incoming.expand(self.num_free_nodes).clone()
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs,
-        )
-
     def training_loss(
         self,
         *,
@@ -824,9 +767,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
         residual_gt_free = self._flatten_free(residual_gt, self.cfg.pred_length, "residual_gt")
         history_free = self._flatten_free(history_full, self.cfg.input_length, "history_full")
         coarse_free = self._flatten_free(coarse_future_full, self.cfg.pred_length, "coarse_future_full")
-
-        s = self._residual_scale(residual_gt_free)
-        x0 = residual_gt_free.float() / s
+        x0 = residual_gt_free.float()
         device = residual_gt_free.device
         _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._schedule_tensors(device, x0.dtype)
 
@@ -840,81 +781,18 @@ class TimeResidualConditionalDiffusion(nn.Module):
         x_t = sqrt_ab * x0 + sqrt_omb * eta
         v = sqrt_ab * eta - sqrt_omb * x0
 
-        # CFG coarse dropout: per-sample Bernoulli mask.
-        # Samples where use_null[b] = True are routed through the unconditional branch.
-        p_drop = float(self.cfg.cfg_p_drop)
-        if p_drop > 0.0 and self.cfg.cond_use_coarse:
-            use_null_mask = torch.bernoulli(
-                torch.full((B,), p_drop, device=device)
-            ).bool()  # (B,)
-            if use_null_mask.any() and not use_null_mask.all():
-                # Split batch into conditional and unconditional subsets,
-                # run two forward passes, then recombine. This avoids any
-                # in-place modification of coarse_free and keeps gradients clean.
-                idx_cond = (~use_null_mask).nonzero(as_tuple=True)[0]
-                idx_null = use_null_mask.nonzero(as_tuple=True)[0]
-
-                v_hat_cond = self.denoiser(
-                    x_t[idx_cond].to(dtype=history_free.dtype),
-                    t[idx_cond],
-                    history_free[idx_cond],
-                    coarse_free[idx_cond],
-                    mamp_feat=mamp_feat[idx_cond] if mamp_feat is not None else None,
-                    use_null_coarse=False,
-                )
-                v_hat_null = self.denoiser(
-                    x_t[idx_null].to(dtype=history_free.dtype),
-                    t[idx_null],
-                    history_free[idx_null],
-                    coarse_free[idx_null],
-                    mamp_feat=mamp_feat[idx_null] if mamp_feat is not None else None,
-                    use_null_coarse=True,
-                )
-                v_hat = torch.empty_like(v.float())
-                v_hat[idx_cond] = v_hat_cond.float()
-                v_hat[idx_null] = v_hat_null.float()
-            elif use_null_mask.all():
-                v_hat = self.denoiser(
-                    x_t.to(dtype=history_free.dtype),
-                    t,
-                    history_free,
-                    coarse_free,
-                    mamp_feat=mamp_feat,
-                    use_null_coarse=True,
-                ).float()
-            else:
-                # use_null_mask is all False
-                v_hat = self.denoiser(
-                    x_t.to(dtype=history_free.dtype),
-                    t,
-                    history_free,
-                    coarse_free,
-                    mamp_feat=mamp_feat,
-                    use_null_coarse=False,
-                ).float()
-        else:
-            v_hat = self.denoiser(
-                x_t.to(dtype=history_free.dtype),
-                t,
-                history_free,
-                coarse_free,
-                mamp_feat=mamp_feat,
-                use_null_coarse=False,
-            ).float()
+        v_hat = self.denoiser(
+            x_t.to(dtype=history_free.dtype),
+            t,
+            history_free,
+            coarse_free,
+            mamp_feat=mamp_feat,
+        ).float()
 
         err = v_hat - v
         err_w = torch.matmul(err, inv_chol.t())
         v_loss = torch.mean(err_w ** 2)
-
-        x0_loss_weight = float(self.cfg.x0_loss_weight)
-        if x0_loss_weight <= 0.0:
-            return v_loss
-
-        x0_hat = sqrt_ab * x_t - sqrt_omb * v_hat
-        x0_err = x0_hat - x0
-        x0_err_w = torch.matmul(x0_err, inv_chol.t())
-        x0_loss = torch.mean(x0_err_w ** 2)
-        return v_loss + x0_loss_weight * x0_loss
+        return v_loss
 
     @torch.no_grad()
     def sample_ddim(
@@ -927,7 +805,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
         steps: Optional[int] = None,
         eta: float = 0.0,
         return_score: bool = False,
-        cfg_guidance_weight: float = 0.0,
     ) -> torch.Tensor:
         if steps is None:
             steps = self.cfg.ddim_steps
@@ -945,9 +822,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
 
         gen = torch.Generator(device=device)
         gen.manual_seed(int(seed))
-        s_joint = torch.clamp(self.ema_rms.to(device=device), min=float(self.cfg.residual_rms_eps))
-        s = s_joint.view(1, 1, self.num_free_nodes, 1).expand(1, 1, self.num_free_nodes, 3)
-        s = s.reshape(1, 1, self.free_feature_dim)
         x = torch.randn(
             (B, self.cfg.pred_length, self.free_feature_dim),
             device=device, dtype=torch.float32, generator=gen,
@@ -960,13 +834,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
         clip = float(self.cfg.x0_clip)
         score = torch.zeros(B, device=device, dtype=torch.float32) if return_score else None
 
-        # Whether to run CFG double pass at inference.
-        run_cfg = (
-            abs(cfg_guidance_weight) > 0.0
-            and self.cfg.cond_use_coarse
-            and float(self.cfg.cfg_p_drop) > 0.0
-        )
-
         for idx in range(t_seq.numel()):
             t_int = int(t_seq[idx].item())
             t_batch = torch.full((B,), t_int, device=device, dtype=torch.long)
@@ -976,21 +843,9 @@ class TimeResidualConditionalDiffusion(nn.Module):
 
             x_input = x.to(dtype=history_free.dtype)
 
-            v_hat_cond = self.denoiser(
-                x_input, t_batch, history_free, coarse_free,
-                mamp_feat=mamp_feat, use_null_coarse=False,
+            v_hat = self.denoiser(
+                x_input, t_batch, history_free, coarse_free, mamp_feat=mamp_feat,
             ).float()
-
-            if run_cfg:
-                v_hat_uncond = self.denoiser(
-                    x_input, t_batch, history_free, coarse_free,
-                    mamp_feat=mamp_feat, use_null_coarse=True,
-                ).float()
-                # Guidance: positive w sharpens conditioning, negative w increases diversity.
-                w = float(cfg_guidance_weight)
-                v_hat = (1.0 + w) * v_hat_cond - w * v_hat_uncond
-            else:
-                v_hat = v_hat_cond
 
             x0 = sqrt_ab_t * x - sqrt_omb_t * v_hat
             if clip > 0.0:
@@ -1016,7 +871,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
             else:
                 x = sqrt_ab_prev * x0 + sqrt_omb_prev * eta_hat
 
-        out_free = (x * s).to(dtype=history_full.dtype)
+        out_free = x.to(dtype=history_full.dtype)
         out_full = self._restore_full_from_free(out_free, self.cfg.pred_length, history_full.dtype)
         if score is None:
             return out_full
@@ -1078,14 +933,7 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
         deterministic: bool = True,
         seed: int = 0,
         return_score: bool = False,
-        cfg_guidance_weight: Optional[float] = None,
     ) -> torch.Tensor:
-        """
-        cfg_guidance_weight: overrides cfg.cfg_guidance_weight for this call.
-            w = 0.0  -> pure conditional (default, best MPJPE)
-            w < 0.0  -> suppresses coarse conditioning, increases APD
-            w > 0.0  -> sharpens coarse conditioning, decreases APD
-        """
         _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
         if coarse_future is None:
             coarse_future = self.coarse(history)
@@ -1096,7 +944,6 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
                 "coarse_future",
             )
 
-        w = self.cfg.cfg_guidance_weight if cfg_guidance_weight is None else float(cfg_guidance_weight)
         coarse_cond = coarse_future.detach() if self.cfg.stopgrad_coarse_condition else coarse_future
         residual_pred = self.diffusion.sample_ddim(
             history_full=history,
@@ -1106,7 +953,6 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
             steps=self.cfg.ddim_steps,
             eta=0.0 if deterministic else 1.0,
             return_score=return_score,
-            cfg_guidance_weight=w,
         )
 
         if return_score:

@@ -34,6 +34,7 @@ defaults:
   diff_specs:
     beta_schedule: ours
     diffuse_steps: 10
+    div_k: 2
     loss_type: l1
     objective: pred_x0
   learn_specs:

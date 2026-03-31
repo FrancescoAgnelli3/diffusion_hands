@@ -719,9 +719,30 @@ def train(
         twostage_diffusion_lr = float(learning_rate) * 0.1
         cond_use_history = bool(config.get("twostage_cond_use_history", True))
         cond_use_coarse = bool(config.get("twostage_cond_use_coarse", True))
-        x0_loss_weight = float(config.get("twostage_x0_loss_weight", 0.0))
-        residual_ema_decay = float(config.get("twostage_residual_ema_decay", 0.99))
-        residual_rms_eps = float(config.get("twostage_residual_rms_eps", 1e-6))
+        allow_no_conditioning = bool(config.get("twostage_allow_no_conditioning", False))
+        coarse_target_lowpass_only = bool(config.get("twostage_coarse_target_lowpass_only", False))
+        mobility_palm_var = float(config.get("twostage_mobility_palm_var", 0.15))
+        mobility_depth1_var = float(config.get("twostage_mobility_depth1_var", 0.35))
+        mobility_depth2_var = float(config.get("twostage_mobility_depth2_var", 0.70))
+        mobility_depth3plus_var = float(config.get("twostage_mobility_depth3plus_var", 1.00))
+        graph_edge_strength = float(config.get("twostage_graph_edge_strength", 0.22))
+        graph_two_hop_strength = float(config.get("twostage_graph_two_hop_strength", 0.05))
+        covariance_jitter = float(config.get("twostage_covariance_jitter", 1e-4))
+        twostage_use_mamp_condition = bool(config.get("twostage_use_mamp_condition", False))
+        twostage_use_mamp_condition_coarse = bool(config.get("twostage_use_mamp_condition_coarse", False))
+        twostage_use_any_mamp_condition = (
+            twostage_use_mamp_condition or twostage_use_mamp_condition_coarse
+        )
+        if not (
+            cond_use_history
+            or cond_use_coarse
+            or twostage_use_any_mamp_condition
+            or allow_no_conditioning
+        ):
+            raise ValueError(
+                "twostage has no conditioning source enabled. "
+                "Set twostage_allow_no_conditioning=true to run a true unconditional mode."
+            )
         twostage_wrist_cfg = config.get("twostage_wrist_index")
         if twostage_wrist_cfg is None:
             twostage_wrist_index = int(ordered_wrists[0]) if ordered_wrists else 0
@@ -777,9 +798,15 @@ def train(
             freeze_coarse=freeze_coarse,
             cond_use_history=cond_use_history,
             cond_use_coarse=cond_use_coarse,
-            x0_loss_weight=x0_loss_weight,
-            residual_ema_decay=residual_ema_decay,
-            residual_rms_eps=residual_rms_eps,
+            allow_no_conditioning=allow_no_conditioning,
+            coarse_target_lowpass_only=coarse_target_lowpass_only,
+            mobility_palm_var=mobility_palm_var,
+            mobility_depth1_var=mobility_depth1_var,
+            mobility_depth2_var=mobility_depth2_var,
+            mobility_depth3plus_var=mobility_depth3plus_var,
+            graph_edge_strength=graph_edge_strength,
+            graph_two_hop_strength=graph_two_hop_strength,
+            covariance_jitter=covariance_jitter,
             simlpe_use_norm=bool(config.get("simlpe_use_norm", True)),
             simlpe_spatial_fc_only=bool(config.get("simlpe_spatial_fc_only", False)),
             simlpe_mix_spatial_temporal=bool(config.get("simlpe_mix_spatial_temporal", False)),
@@ -1914,6 +1941,14 @@ def train(
             mpjpe_norm_running += float(per_sample_mpjpe_norm.sum().item())
 
             apply_supervised_losses = not (model == "twostage_dct_diffusion" and twostage_phase == "diffusion")
+            supervised_tgt_3d = tgt_3d
+            if (
+                model == "twostage_dct_diffusion"
+                and twostage_phase == "coarse"
+                and coarse_target_lowpass_only
+            ):
+                with torch.no_grad():
+                    supervised_tgt_3d = twostage_model.coarse.lowpass_future_target(in_3d, tgt_3d)
             loss = mpjpe_loss
 
             if model == "hisrep_hand":
@@ -1934,10 +1969,11 @@ def train(
                 else:
                     # Optional bone-length loss on hand skeleton
                     if bone_loss_weight > 0:
-                        bl_loss = U.bone_length_loss_edges(recons, tgt_3d, edges_t)
-                        loss = mpjpe_loss + float(bone_loss_weight) * bl_loss
+                        supervised_mpjpe_loss = torch.norm(recons - supervised_tgt_3d, dim=-1).mean()
+                        bl_loss = U.bone_length_loss_edges(recons, supervised_tgt_3d, edges_t)
+                        loss = supervised_mpjpe_loss + float(bone_loss_weight) * bl_loss
                     else:
-                        loss = mpjpe_loss
+                        loss = torch.norm(recons - supervised_tgt_3d, dim=-1).mean()
             
             if model == "SplineEqNet":
                 reg_model = _get_active_dual_model()
@@ -1954,7 +1990,7 @@ def train(
             
             last_observed_pose = in_3d[:, -1, :, :]
             pred_velocity_mag = _velocity_magnitude(recons, last_observed_pose)
-            tgt_velocity_mag = tgt_vel
+            tgt_velocity_mag = _velocity_magnitude(supervised_tgt_3d, last_observed_pose)
             vel_mae_per_sample = (pred_velocity_mag - tgt_velocity_mag).abs().mean(dim=(1, 2))
             vel_loss = vel_mae_per_sample.mean()
             if apply_supervised_losses and velocity_loss_weight > 0:

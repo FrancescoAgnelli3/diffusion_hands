@@ -44,6 +44,12 @@ Custom config:
 bash scripts/run_all_models.sh configs/experiment.yaml
 ```
 
+Twostage ablations:
+
+```bash
+bash scripts/run_twostage_ablation.sh
+```
+
 ## Experiment Config
 
 `configs/experiment.yaml` controls:
@@ -79,6 +85,7 @@ For all other datasets (`h2o`, `bighands`, `fpha`), the runner forces an empty f
 
 - Aggregate metrics are appended to:
   - `results/all_models_metrics_long.csv`
+  - `results/twostage_dct_diffusion_ablations.csv` for the dedicated twostage ablation launcher
 - Model-specific training artifacts are written in vendor folders:
   - `vendor/splineeqnet/out/diffusion_hands_runs/twostage_dct_diffusion/<run_id>/`
   - `vendor/skeletondiffusion/out/diffusion_hands_runs/skeletondiffusion_<run_id>/`

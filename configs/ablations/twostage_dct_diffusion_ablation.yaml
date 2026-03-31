@@ -1,0 +1,97 @@
+seed: 0
+gpu_index: 0
+num_candidates: 10
+humanmac_multimodal_threshold: 0.5
+
+preprocessing:
+  input_n: 70
+  output_n: 30
+  stride: 5
+  time_interp: null
+  window_norm: null
+  eval_batch_mult: 1
+
+dataset: assembly
+action_filter: "pick_up_screwd"
+
+runtime:
+  output_root: /home/agnelli/projects/diffusion_hands/results
+  aggregate_csv: /home/agnelli/projects/diffusion_hands/results/twostage_dct_diffusion_ablations.csv
+
+models:
+  twostage_base:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "baseline: k_low=20, coarse conditioning on, frozen coarse stage"
+
+  twostage_no_coarse_cond:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "ablation: remove coarse prediction conditioning from diffusion"
+    defaults:
+      twostage_cond_use_history: true
+      twostage_cond_use_coarse: false
+
+  twostage_hist_plus_coarse:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "ablation: add history tokens alongside coarse conditioning"
+    defaults:
+      twostage_cond_use_history: true
+
+  twostage_train_coarse_joint:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "ablation: unfreeze coarse model during diffusion stage"
+    defaults:
+      twostage_freeze_coarse: false
+
+  twostage_lowpass_coarse_gt:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "ablation: supervise coarse stage with low-pass-only target"
+    defaults:
+      twostage_coarse_target_lowpass_only: true
+
+  twostage_dropout_01:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "ablation: set twostage denoiser dropout to 0.1"
+    defaults:
+      twostage_dropout: 0.1
+
+  twostage_isotropic_noise:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "ablation: replace hand-structured diffusion noise with isotropic noise"
+    defaults:
+      twostage_mobility_palm_var: 1.0
+      twostage_mobility_depth1_var: 1.0
+      twostage_mobility_depth2_var: 1.0
+      twostage_mobility_depth3plus_var: 1.0
+      twostage_graph_edge_strength: 0.0
+      twostage_graph_two_hop_strength: 0.0
+      twostage_covariance_jitter: 0.0
+
+  twostage_klow_10:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "ablation: reduce low-frequency DCT budget from 20 to 10"
+    defaults:
+      twostage_k_low: 10
+
+  twostage_klow_40:
+    config_path: ../models/twostage_dct_diffusion.yaml
+    base_model: twostage_dct_diffusion
+    enabled: true
+    notes: "ablation: increase low-frequency DCT budget from 20 to 40"
+    defaults:
+      twostage_k_low: 40

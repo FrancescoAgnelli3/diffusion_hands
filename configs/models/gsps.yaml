@@ -29,7 +29,7 @@ defaults:
     parts:
       - [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
       - [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
-    lambdas: [100.0, 500.0, 8.0, 25.0, 2.0, 1.0, 0.01, 0.01, 0.0]
+    lambdas: [100.0, 500.0, 20.0, 25.0, 2.0, 1.0, 0.01, 0.01, 0.0]
     alphas: [100.0, 300.0]
 
   train:
@@ -38,8 +38,8 @@ defaults:
     lr: 0.001
     weight_decay: 0.0
     skip_if_exists: true
-    objective: best_of_k
-    n_modality: 10
+    objective: composite
+    n_modality: 1
 
   prior:
     enabled: false

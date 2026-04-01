@@ -30,10 +30,10 @@ from common.preprocessing import default_action_filter
 VENDOR = ROOT / "vendor"
 PYTHON = os.environ.get("DIFFUSION_HANDS_PYTHON", sys.executable)
 DEFAULT_DATA_ROOTS: Dict[str, str] = {
-    "assembly": "/mnt/TuringDatasets/AssemblyHands/assembly101-download-scripts/data_our/",
-    "h2o": "/mnt/TuringDatasets/h2o/",
-    "bighands": "/mnt/TuringDatasets/BigHands/BigHand2.2M/data/",
-    "fpha": "/mnt/TuringDatasets/FPHA/data/",
+    "assembly": "/mnt/turing-datasets/AssemblyHands/assembly101-download-scripts/data_our/",
+    "h2o": "/mnt/turing-datasets/h2o/",
+    "bighands": "/mnt/turing-datasets/BigHands/BigHand2.2M/data/",
+    "fpha": "/mnt/turing-datasets/FPHA/data/",
 }
 DEFAULT_RUNTIME: Dict[str, str] = {
     "output_root": str(ROOT / "results"),

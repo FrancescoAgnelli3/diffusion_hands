@@ -18,58 +18,52 @@ runtime:
   output_root: /home/agnelli/projects/diffusion_hands/results
   aggregate_csv: /home/agnelli/projects/diffusion_hands/results/twostage_dct_diffusion_ablations.csv
 
+twostage_ablation_base: &twostage_ablation_base
+  config_path: ../models/twostage_dct_diffusion.yaml
+  base_model: twostage_dct_diffusion
+  enabled: true
+
 models:
   twostage_base:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
-    notes: "baseline: k_low=20, coarse conditioning on, frozen coarse stage"
+    <<: *twostage_ablation_base
+    notes: "baseline: exact configs/models/twostage_dct_diffusion.yaml (k_low=60, coarse conditioning on, history conditioning off, coarse unfrozen)"
 
+  # Conditioning ablations (baseline has coarse=true, history=false)
   twostage_no_coarse_cond:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
-    notes: "ablation: remove coarse prediction conditioning from diffusion"
+    <<: *twostage_ablation_base
+    notes: "ablation: remove coarse prediction conditioning (history-only conditioning)"
     defaults:
       twostage_cond_use_history: true
       twostage_cond_use_coarse: false
 
   twostage_hist_plus_coarse:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
-    notes: "ablation: add history tokens alongside coarse conditioning"
+    <<: *twostage_ablation_base
+    notes: "ablation: add history conditioning alongside coarse conditioning"
     defaults:
       twostage_cond_use_history: true
 
-  twostage_train_coarse_joint:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
-    notes: "ablation: unfreeze coarse model during diffusion stage"
+  # Coarse-stage training ablations (baseline has freeze_coarse=false)
+  twostage_freeze_coarse:
+    <<: *twostage_ablation_base
+    notes: "ablation: freeze coarse model during diffusion stage"
     defaults:
-      twostage_freeze_coarse: false
+      twostage_freeze_coarse: true
 
   twostage_lowpass_coarse_gt:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
+    <<: *twostage_ablation_base
     notes: "ablation: supervise coarse stage with low-pass-only target"
     defaults:
       twostage_coarse_target_lowpass_only: true
 
+  # Denoiser / diffusion noise ablations
   twostage_dropout_01:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
+    <<: *twostage_ablation_base
     notes: "ablation: set twostage denoiser dropout to 0.1"
     defaults:
       twostage_dropout: 0.1
 
   twostage_isotropic_noise:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
+    <<: *twostage_ablation_base
     notes: "ablation: replace hand-structured diffusion noise with isotropic noise"
     defaults:
       twostage_mobility_palm_var: 1.0
@@ -80,18 +74,15 @@ models:
       twostage_graph_two_hop_strength: 0.0
       twostage_covariance_jitter: 0.0
 
-  twostage_klow_10:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
-    notes: "ablation: reduce low-frequency DCT budget from 20 to 10"
-    defaults:
-      twostage_k_low: 10
-
+  # DCT coarse budget ablations around baseline k_low=60
   twostage_klow_40:
-    config_path: ../models/twostage_dct_diffusion.yaml
-    base_model: twostage_dct_diffusion
-    enabled: true
-    notes: "ablation: increase low-frequency DCT budget from 20 to 40"
+    <<: *twostage_ablation_base
+    notes: "ablation: reduce low-frequency DCT budget from 60 to 40"
     defaults:
       twostage_k_low: 40
+
+  twostage_klow_80:
+    <<: *twostage_ablation_base
+    notes: "ablation: increase low-frequency DCT budget from 60 to 80"
+    defaults:
+      twostage_k_low: 80

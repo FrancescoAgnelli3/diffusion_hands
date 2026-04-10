@@ -30,10 +30,10 @@ from common.preprocessing import default_action_filter
 VENDOR = ROOT / "vendor"
 PYTHON = os.environ.get("DIFFUSION_HANDS_PYTHON", sys.executable)
 DEFAULT_DATA_ROOTS: Dict[str, str] = {
-    "assembly": "/mnt/turing-datasets/AssemblyHands/assembly101-download-scripts/data_our/",
-    "h2o": "/mnt/turing-datasets/h2o/",
-    "bighands": "/mnt/turing-datasets/BigHands/BigHand2.2M/data/",
-    "fpha": "/mnt/turing-datasets/FPHA/data/",
+    "assembly": "/mnt/pve/Turing-Storage2/AssemblyHands/assembly101-download-scripts/data_our/",
+    "h2o": "/mnt/pve/Turing-Storage2/h2o/",
+    "bighands": "/mnt/pve/Turing-Storage2/BigHands/BigHand2.2M/data/",
+    "fpha": "/mnt/pve/Turing-Storage2/FPHA/data/",
 }
 DEFAULT_RUNTIME: Dict[str, str] = {
     "output_root": str(ROOT / "results"),
@@ -498,34 +498,36 @@ def run_comusion(model_name: str, dataset: str, data_dir: Path, action_filter: s
     template["logging_specs"]["model_path"] = f"./results/{cfg_id}"
     _dump_yaml(cfg_path, template)
 
-    rc = _run(
-        [
-            PYTHON,
-            "train.py",
-            "--cfg",
-            cfg_id,
-            "--seed",
-            str(cfg["seed"]),
-            "--gpu_index",
-            str(_child_gpu_index(cfg)),
-        ],
-        cwd=wd,
-        env=_gpu_subprocess_env(cfg),
-    )
-    if rc != 0:
-        raise RuntimeError("CoMusion run failed")
+    try:
+        rc = _run(
+            [
+                PYTHON,
+                "train.py",
+                "--cfg",
+                cfg_id,
+                "--seed",
+                str(cfg["seed"]),
+                "--gpu_index",
+                str(_child_gpu_index(cfg)),
+            ],
+            cwd=wd,
+            env=_gpu_subprocess_env(cfg),
+        )
+        if rc != 0:
+            raise RuntimeError("CoMusion run failed")
 
-    stats_path = wd / "results" / cfg_id / "results" / "eval_stats.csv"
-    row = read_one_row_csv(stats_path)
-    try:
-        cfg_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    try:
-        shutil.rmtree(wd / "results" / cfg_id, ignore_errors=True)
-    except OSError:
-        pass
-    return normalize_metrics_dict(row)
+        stats_path = wd / "results" / cfg_id / "results" / "eval_stats.csv"
+        row = read_one_row_csv(stats_path)
+        return normalize_metrics_dict(row)
+    finally:
+        try:
+            cfg_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            shutil.rmtree(wd / "results" / cfg_id, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def run_dlow_cvae(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
@@ -1005,6 +1007,31 @@ def _resolve_datasets(cfg: dict) -> List[str]:
     return deduped
 
 
+def _resolve_action_filters(cfg: dict, dataset: str) -> List[str]:
+    # Apply action_filter only to assembly; keep other datasets unfiltered.
+    if dataset != "assembly":
+        return [""]
+
+    raw = cfg.get("action_filter", "")
+    if isinstance(raw, list):
+        if not raw:
+            raise ValueError("'action_filter' must be a non-empty list when provided as a list.")
+        out = [str(action).strip() for action in raw if str(action).strip()]
+        if not out:
+            raise ValueError("'action_filter' list must contain at least one non-empty action.")
+    else:
+        configured_action_filter = "" if raw is None else str(raw).strip()
+        out = [default_action_filter(dataset, configured_action_filter)]
+
+    deduped: List[str] = []
+    seen = set()
+    for action_filter in out:
+        if action_filter not in seen:
+            deduped.append(action_filter)
+            seen.add(action_filter)
+    return deduped
+
+
 def _cleanup_legacy_result_artifacts(out_root: Path) -> None:
     # Remove legacy skeletondiffusion runs that were previously written under
     # diffusion_hands/results by older versions of this orchestrator.
@@ -1049,43 +1076,41 @@ def main() -> None:
         "gsps": run_gsps,
     }
     for dataset in datasets:
-        configured_action_filter = str(cfg.get("action_filter", ""))
-        # Apply action_filter only to assembly; keep other datasets unfiltered.
-        action_filter = default_action_filter(dataset, configured_action_filter) if dataset == "assembly" else ""
         data_dir = Path(data_roots[dataset])
-        run_id = f"{dataset}_{action_filter or 'all'}_{_now()}"
+        for action_filter in _resolve_action_filters(cfg, dataset):
+            run_id = f"{dataset}_{action_filter or 'all'}_{_now()}"
 
-        print(f"[DATASET] starting dataset={dataset} action_filter={action_filter!r} data_dir={data_dir}")
+            print(f"[DATASET] starting dataset={dataset} action_filter={action_filter!r} data_dir={data_dir}")
 
-        for model_name, model_cfg in cfg.get("models", {}).items():
-            if not bool(model_cfg.get("enabled", False)):
-                continue
-            base_model = str(model_cfg.get("base_model", model_name)).strip().lower()
-            fn = runners.get(base_model)
-            if fn is None:
-                raise ValueError(
-                    f"Unsupported base_model '{base_model}' for models.{model_name}. "
-                    f"Supported models: {sorted(runners)}"
-                )
-            row: Dict[str, object] = {
-                "timestamp": _now(),
-                "dataset": dataset,
-                "action_filter": action_filter,
-                "model": model_name,
-                "status": "ok",
-                "notes": str(model_cfg.get("notes", "") or ""),
-                **{k: float("nan") for k in CANONICAL_METRIC_KEYS},
-            }
-            try:
-                metrics = fn(model_name, dataset, data_dir, action_filter, cfg, run_id)
-                row.update(metrics)
-                print(f"[{dataset}:{model_name}] metrics={metrics}")
-            except Exception as exc:
-                row["status"] = "failed"
-                prefix = str(model_cfg.get("notes", "") or "").strip()
-                row["notes"] = f"{prefix} | {exc}" if prefix else str(exc)
-                print(f"[{dataset}:{model_name}] FAILED: {exc}")
-            _append_long_csv(aggregate_csv, row)
+            for model_name, model_cfg in cfg.get("models", {}).items():
+                if not bool(model_cfg.get("enabled", False)):
+                    continue
+                base_model = str(model_cfg.get("base_model", model_name)).strip().lower()
+                fn = runners.get(base_model)
+                if fn is None:
+                    raise ValueError(
+                        f"Unsupported base_model '{base_model}' for models.{model_name}. "
+                        f"Supported models: {sorted(runners)}"
+                    )
+                row: Dict[str, object] = {
+                    "timestamp": _now(),
+                    "dataset": dataset,
+                    "action_filter": action_filter,
+                    "model": model_name,
+                    "status": "ok",
+                    "notes": str(model_cfg.get("notes", "") or ""),
+                    **{k: float("nan") for k in CANONICAL_METRIC_KEYS},
+                }
+                try:
+                    metrics = fn(model_name, dataset, data_dir, action_filter, cfg, run_id)
+                    row.update(metrics)
+                    print(f"[{dataset}:{model_name}] metrics={metrics}")
+                except Exception as exc:
+                    row["status"] = "failed"
+                    prefix = str(model_cfg.get("notes", "") or "").strip()
+                    row["notes"] = f"{prefix} | {exc}" if prefix else str(exc)
+                    print(f"[{dataset}:{model_name}] FAILED: {exc}")
+                _append_long_csv(aggregate_csv, row)
 
     print(f"[DONE] aggregate metrics csv: {aggregate_csv}")
 

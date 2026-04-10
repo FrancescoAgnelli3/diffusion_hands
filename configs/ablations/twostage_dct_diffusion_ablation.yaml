@@ -1,5 +1,5 @@
 seed: 0
-gpu_index: 0
+gpu_index: 1
 num_candidates: 10
 humanmac_multimodal_threshold: 0.5
 
@@ -15,8 +15,11 @@ dataset: assembly
 action_filter: "pick_up_screwd"
 
 runtime:
-  output_root: /home/agnelli/projects/diffusion_hands/results
-  aggregate_csv: /home/agnelli/projects/diffusion_hands/results/twostage_dct_diffusion_ablations.csv
+  output_root: /home/fagnelli/diffusion_hands/results
+  aggregate_csv: /home/fagnelli/diffusion_hands/results/twostage_dct_diffusion_ablations.csv
+
+data_roots:
+  assembly: /mnt/pve/Turing-Storage2/AssemblyHands/assembly101-download-scripts/data_our/
 
 twostage_ablation_base: &twostage_ablation_base
   config_path: ../models/twostage_dct_diffusion.yaml
@@ -73,6 +76,12 @@ models:
       twostage_graph_edge_strength: 0.0
       twostage_graph_two_hop_strength: 0.0
       twostage_covariance_jitter: 0.0
+
+  twostage_anisotropic_plain_mse:
+    <<: *twostage_ablation_base
+    notes: "ablation: keep anisotropic forward noise but use plain MSE diffusion loss instead of Mahalanobis-whitened MSE"
+    defaults:
+      twostage_diffusion_loss_type: mse
 
   # DCT coarse budget ablations around baseline k_low=60
   twostage_klow_40:

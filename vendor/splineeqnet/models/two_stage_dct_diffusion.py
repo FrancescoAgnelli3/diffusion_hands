@@ -116,6 +116,7 @@ class TwoStageDCTDiffusionConfig:
     cond_use_coarse: bool = True
     allow_no_conditioning: bool = False
     coarse_target_lowpass_only: bool = False
+    diffusion_loss_type: str = "mahalanobis_mse"
 
     # Sampling stabilizers
     x0_clip: float = 0  # clip x0_hat in normalized space (0 disables)
@@ -125,8 +126,8 @@ class TwoStageDCTDiffusionConfig:
     mobility_depth1_var: float = 0.35
     mobility_depth2_var: float = 0.70
     mobility_depth3plus_var: float = 1.00
-    graph_edge_strength: float = 0.22
-    graph_two_hop_strength: float = 0.05
+    graph_edge_strength: float = 0.6
+    graph_two_hop_strength: float = 0.2
     covariance_jitter: float = 1e-4
 
     @property
@@ -660,7 +661,7 @@ class HandKinematicCovariance:
         else:
             Sigma_node = Sigma_node + self.jitter * torch.eye(Nf, dtype=torch.float32)
         tr = float(torch.trace(Sigma_node).item())
-        Sigma_node = Sigma_node * (Nf / max(tr, 1e-12))
+        # Sigma_node = Sigma_node * (Nf / max(tr, 1e-12))
         Sigma_feat = torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
         Sigma_feat = 0.5 * (Sigma_feat + Sigma_feat.t())
         eigvals_feat = torch.linalg.eigvalsh(Sigma_feat)
@@ -790,8 +791,16 @@ class TimeResidualConditionalDiffusion(nn.Module):
         ).float()
 
         err = v_hat - v
-        err_w = torch.matmul(err, inv_chol.t())
-        v_loss = torch.mean(err_w ** 2)
+        if self.cfg.diffusion_loss_type == "mahalanobis_mse":
+            err_w = torch.matmul(err, inv_chol.t())
+            v_loss = torch.mean(err_w ** 2)
+        elif self.cfg.diffusion_loss_type == "mse":
+            v_loss = torch.mean(err ** 2)
+        else:
+            raise ValueError(
+                f"Unsupported diffusion_loss_type={self.cfg.diffusion_loss_type!r}. "
+                "Expected 'mahalanobis_mse' or 'mse'."
+            )
         return v_loss
 
     @torch.no_grad()

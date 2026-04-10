@@ -209,6 +209,7 @@ def _build_train_cfg(
     cfg.twostage_denoiser_depth = _coerce_optional(best_cfg.get("twostage_denoiser_depth"), int)
     cfg.twostage_denoiser_heads = _coerce_optional(best_cfg.get("twostage_denoiser_heads"), int)
     cfg.twostage_dropout = _coerce_optional(best_cfg.get("twostage_dropout"), float)
+    cfg.twostage_diffusion_loss_type = _coerce_optional(best_cfg.get("twostage_diffusion_loss_type"), str)
     cfg.twostage_freeze_coarse = _coerce_optional(best_cfg.get("twostage_freeze_coarse"), bool)
     cfg.twostage_diffusion_coarse_warmup_epochs = _coerce_optional(
         best_cfg.get("twostage_diffusion_coarse_warmup_epochs"), int

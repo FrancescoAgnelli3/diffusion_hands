@@ -138,6 +138,7 @@ class TrainCfg:
     twostage_denoiser_depth: Optional[int] = None
     twostage_denoiser_heads: Optional[int] = None
     twostage_dropout: Optional[float] = None
+    twostage_diffusion_loss_type: Optional[str] = None
     twostage_freeze_coarse: Optional[bool] = None
     twostage_diffusion_coarse_warmup_epochs: Optional[int] = None
     twostage_cond_use_history: Optional[bool] = None

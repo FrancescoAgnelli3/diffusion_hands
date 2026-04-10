@@ -1,0 +1,31 @@
+normalize_data: false
+nz: 128
+lambda_v: 1000
+beta: 0.1
+vae_specs:
+  rnn_type: gru
+  x_birnn: false
+  e_birnn: false
+  use_drnn_mlp: true
+vae_lr: 0.001
+batch_size: 64
+num_vae_epoch: 1
+num_vae_epoch_fix: 1
+num_vae_data_sample: 5000
+dataset: bighands
+data_dir: /mnt/pve/Turing-Storage2/BigHands/BigHand2.2M/data
+action_filter: ''
+t_his: 70
+t_pred: 30
+stride: 5
+time_interp: null
+window_norm: null
+splineeqnet_root: /home/fagnelli/diffusion_hands/vendor/splineeqnet
+seed: 0
+nk: 2
+early_stopping_enabled: true
+early_stopping_patience: 15
+early_stopping_min_delta: 0.0001
+early_stopping_warmup: 5
+early_stopping_monitor: train_loss
+save_model_interval: 300

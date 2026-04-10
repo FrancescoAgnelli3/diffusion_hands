@@ -191,6 +191,7 @@ def run_experiment(
         ("twostage_denoiser_depth", train_cfg.twostage_denoiser_depth, int),
         ("twostage_denoiser_heads", train_cfg.twostage_denoiser_heads, int),
         ("twostage_dropout", train_cfg.twostage_dropout, float),
+        ("twostage_diffusion_loss_type", train_cfg.twostage_diffusion_loss_type, str),
         ("twostage_freeze_coarse", train_cfg.twostage_freeze_coarse, bool),
         ("twostage_diffusion_coarse_warmup_epochs", train_cfg.twostage_diffusion_coarse_warmup_epochs, int),
         ("twostage_cond_use_history", train_cfg.twostage_cond_use_history, bool),

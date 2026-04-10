@@ -79,6 +79,7 @@ If omitted from `experiment.yaml`, these are provided by `tools/run_all_models.p
 ### Action Filter Behavior
 
 `action_filter` is applied only for `assembly`.
+It can be a single string or a list of action strings. When a list is provided, the runner processes each assembly action as a separate run, similar to how `datasets` are processed.
 For all other datasets (`h2o`, `bighands`, `fpha`), the runner forces an empty filter.
 
 ## Outputs

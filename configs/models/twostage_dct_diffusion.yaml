@@ -37,3 +37,4 @@ defaults:
   twostage_use_mamp_condition_coarse: false
   twostage_mpjpe_weight: 0.0
   twostage_coarse_target_lowpass_only: false
+  twostage_diffusion_loss_type: mse # options: mahalanobis, mse

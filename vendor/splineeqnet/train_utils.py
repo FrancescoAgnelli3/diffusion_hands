@@ -709,6 +709,7 @@ def train(
         depth = int(config.get("twostage_denoiser_depth", 6))
         n_heads = int(config.get("twostage_denoiser_heads", 8))
         p_drop = float(config.get("twostage_dropout", 0.0))
+        diffusion_loss_type = str(config.get("twostage_diffusion_loss_type", "mahalanobis_mse"))
         freeze_coarse = bool(config.get("twostage_freeze_coarse", True))
         # If coarse is frozen, keep it frozen during diffusion.
         # Only allow diffusion-stage coarse updates when freeze_coarse is false.
@@ -800,6 +801,7 @@ def train(
             cond_use_coarse=cond_use_coarse,
             allow_no_conditioning=allow_no_conditioning,
             coarse_target_lowpass_only=coarse_target_lowpass_only,
+            diffusion_loss_type=diffusion_loss_type,
             mobility_palm_var=mobility_palm_var,
             mobility_depth1_var=mobility_depth1_var,
             mobility_depth2_var=mobility_depth2_var,

@@ -59,6 +59,18 @@ models:
       twostage_coarse_target_lowpass_only: true
 
   # Denoiser / diffusion noise ablations
+  twostage_denoiser_depth_4:
+    <<: *twostage_ablation_base
+    notes: "ablation: reduce twostage denoiser depth from 6 layers to 4"
+    defaults:
+      twostage_denoiser_depth: 4
+
+  twostage_denoiser_depth_6:
+    <<: *twostage_ablation_base
+    notes: "ablation: use a 6-layer twostage denoiser explicitly"
+    defaults:
+      twostage_denoiser_depth: 6
+
   twostage_dropout_01:
     <<: *twostage_ablation_base
     notes: "ablation: set twostage denoiser dropout to 0.1"

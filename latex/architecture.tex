@@ -1,0 +1,345 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+
+\begin{document}
+
+\title{Architecture of a Two-Stage DCT Coarse Predictor with Conditional Residual Diffusion Refinement}
+\author{}
+\date{}
+\maketitle
+
+\section{Overview}
+
+The model is a two-stage predictor for future 3D hand motion instantiated by
+\texttt{vendor/splineeqnet/models/two\_stage\_dct\_diffusion.py}
+with the defaults used by
+\texttt{configs/experiment.yaml} and
+\texttt{configs/models/twostage\_dct\_diffusion.yaml}.
+
+For the current experiment defaults, the model uses
+\[
+T_{\mathrm{in}} = 70,
+\qquad
+T_{\mathrm{out}} = 30,
+\qquad
+T = 100.
+\]
+The hand sequence is
+\[
+H \in \mathbb{R}^{T_{\mathrm{in}} \times N \times 3},
+\qquad
+Y \in \mathbb{R}^{T_{\mathrm{out}} \times N \times 3},
+\]
+where $N$ is the number of hand landmarks.
+
+The model decomposes the prediction problem into a deterministic coarse stage and a stochastic refinement stage. The final prediction is written as
+\[
+\hat{Y} = \hat{Y}^{c} + \hat{R}.
+\]
+Here $\hat{Y}^{c}$ denotes a coarse deterministic forecast and $\hat{R}$ denotes a residual predicted by a conditional diffusion model. The coarse stage captures the dominant low-frequency structure of the future motion, while the diffusion stage refines the remaining uncertainty.
+
+Diffusion is applied only to the non-wrist joints. The wrist index is provided by dataset metadata, removed from the diffused feature space, and set to zero in the final refined prediction.
+
+\section{Configuration}
+
+With the current default configuration, the model uses
+\[
+K_{\mathrm{low}} = 60,
+\qquad
+T_{\mathrm{diff}} = 50,
+\qquad
+T_{\mathrm{DDIM}} = 25.
+\]
+The coarse SiMLPe-style backbone uses hidden size $128$ and $8$ layers. The diffusion denoiser uses model dimension $128$, depth $6$, $4$ heads, and dropout $0.0$.
+
+Conditioning defaults are:
+\[
+\texttt{cond\_use\_history} = \texttt{false},
+\qquad
+\texttt{cond\_use\_coarse} = \texttt{true},
+\qquad
+\texttt{allow\_no\_conditioning} = \texttt{false}.
+\]
+Thus the denoiser is conditioned only on the coarse future prediction, not on the observed history.
+
+Other important defaults are:
+\[
+\texttt{freeze\_coarse} = \texttt{false},
+\qquad
+\texttt{diffusion\_loss\_type} = \texttt{mse},
+\qquad
+\texttt{beta\_schedule} = \texttt{cosine}.
+\]
+MAMP conditioning is disabled by default.
+
+\section{Stage A: Coarse DCT Forecaster}
+
+\subsection{Padding and DCT Projection}
+
+The history is flattened into
+\[
+H_{\mathrm{flat}} \in \mathbb{R}^{T_{\mathrm{in}} \times F},
+\qquad
+F = 3N.
+\]
+The sequence is extended to length $T = 100$ by repeating the last observed frame:
+\[
+\tilde{H} \in \mathbb{R}^{T \times F}.
+\]
+
+An orthonormal DCT matrix of size $T \times T$ is built, and only the first $K_{\mathrm{low}} = 60$ rows are kept. The padded sequence is projected to low-frequency coefficients:
+\[
+C_{\mathrm{low}} \in \mathbb{R}^{60 \times F}.
+\]
+
+\subsection{Coarse Backbone}
+
+A full coefficient tensor of size
+\[
+C_{\mathrm{full}} \in \mathbb{R}^{T \times F},
+\]
+is formed by placing the observed low-frequency coefficients in its first $60$ rows and setting the remaining $40$ rows to zero. This tensor is processed by the SiMLPe backbone:
+\[
+\hat{C}_{\mathrm{full}} = f_{\mathrm{SiMLPe}}(C_{\mathrm{full}}).
+\]
+Only the first $60$ predicted coefficients are retained:
+\[
+\hat{C}_{\mathrm{low}} = \hat{C}_{\mathrm{full}}[1{:}60].
+\]
+
+\subsection{Coarse Reconstruction}
+
+The predicted low-frequency coefficients are transformed back to the time domain using the truncated inverse DCT:
+\[
+\hat{S}_{\mathrm{low}} \in \mathbb{R}^{T \times F}.
+\]
+The last $30$ frames are taken as the coarse future:
+\[
+\hat{Y}^{c}_{\mathrm{flat}} \in \mathbb{R}^{30 \times F}.
+\]
+After reshaping,
+\[
+\hat{Y}^{c} \in \mathbb{R}^{30 \times N \times 3}.
+\]
+
+Because \texttt{simlpe\_add\_last\_offset=true}, the last observed pose is added to the reconstructed future:
+\[
+\hat{Y}^{c} \leftarrow \hat{Y}^{c} + H_{T_{\mathrm{in}}}.
+\]
+
+\section{Stage B: Residual Diffusion Refinement}
+
+\subsection{Residual Space and Wrist Removal}
+
+The diffusion target is the residual
+\[
+R = Y - \hat{Y}^{c}.
+\]
+The diffusion model does not operate on the full hand state. If the wrist joint index is $w$, then only the non-wrist joints are retained:
+\[
+R_{\mathrm{free}} \in \mathbb{R}^{T_{\mathrm{out}} \times (N-1) \times 3}.
+\]
+After flattening,
+\[
+x_0 \in \mathbb{R}^{T_{\mathrm{out}} \times F_{\mathrm{free}}},
+\qquad
+F_{\mathrm{free}} = 3(N-1).
+\]
+
+The clean diffusion target is simply
+\[
+x_0 = R_{\mathrm{free}}.
+\]
+
+\subsection{Correlated Diffusion Noise}
+
+A hand-structured covariance matrix
+\[
+\Sigma \in \mathbb{R}^{F_{\mathrm{free}} \times F_{\mathrm{free}}}
+\]
+is constructed from the hand graph after removing the wrist. This covariance defines the correlated Gaussian noise used by the forward process.
+
+Its node-level variances depend on graph distance from the wrist:
+\[
+0.15,\ 0.35,\ 0.70,\ 1.00
+\]
+for progressively deeper kinematic levels. Correlations are added for one-hop and two-hop graph neighbors, and this node covariance is combined with the axis covariance
+\[
+\Sigma_{\mathrm{axis}} =
+\begin{bmatrix}
+1.00 & 0.10 & 0.00 \\
+0.10 & 1.00 & 0.00 \\
+0.00 & 0.00 & 2.00
+\end{bmatrix}.
+\]
+
+If $L$ is the Cholesky factor of $\Sigma$, the correlated diffusion noise is obtained from a standard Gaussian auxiliary variable via
+\[
+\eta = \epsilon L^\top,
+\qquad
+\epsilon \sim \mathcal{N}(0,I).
+\]
+Thus $\eta$ follows a Gaussian distribution with covariance $\Sigma$.
+
+The noising process at timestep $t$ is
+\[
+x_t = \sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\eta.
+\]
+The model uses $v$-prediction:
+\[
+v = \sqrt{\bar{\alpha}_t}\,\eta - \sqrt{1-\bar{\alpha}_t}\,x_0.
+\]
+
+\section{Denoiser Architecture}
+
+\subsection{Query Tokens}
+
+The denoiser uses explicit joint tokens. The noisy residual is reshaped as
+\[
+x_t \in \mathbb{R}^{B \times T_{\mathrm{out}} \times (N-1) \times 3}.
+\]
+Each joint coordinate triplet is projected independently to the hidden dimension $d=128$:
+\[
+X^{(0)} = W_q x_t + P_{\mathrm{time}}^{q} + P_{\mathrm{joint}}.
+\]
+So the latent representation is
+\[
+X^{(0)} \in \mathbb{R}^{B \times T_{\mathrm{out}} \times (N-1) \times d}.
+\]
+
+\subsection{Conditioning Tokens}
+
+The denoiser can be conditioned on the observed history, the coarse future forecast, and optional MAMP features. With the current default configuration, only the coarse future is enabled.
+
+The coarse future is first restricted to the non-wrist joints, flattened, reshaped back to joint tokens, and projected:
+\[
+M_{\mathrm{coarse}} = W_c \hat{Y}^{c}_{\mathrm{free}} + P_{\mathrm{time}}^{c} + P_{\mathrm{joint}}.
+\]
+Since \texttt{cond\_use\_history=false}, no history tokens are concatenated by default.
+Since MAMP is disabled, no MAMP tokens are added by default.
+
+Thus the conditioning memory used by cross-attention is
+\[
+M = M_{\mathrm{coarse}}
+\in
+\mathbb{R}^{B \times T_{\mathrm{out}} \times (N-1) \times d}.
+\]
+
+\subsection{Timestep Embedding}
+
+The diffusion timestep is embedded with a sinusoidal embedding followed by a two-layer MLP with SiLU:
+\[
+e_t = \mathrm{MLP}(\mathrm{SinEmbed}(t)),
+\qquad
+e_t \in \mathbb{R}^{B \times d}.
+\]
+This timestep embedding modulates the hidden states through FiLM layers.
+
+\subsection{Transformer Blocks}
+
+The denoiser is composed of $6$ identical blocks. Each block performs three FiLM-modulated operations in sequence:
+
+\begin{enumerate}
+\item spatial self-attention across joints at each future timestep,
+\item temporal self-attention across future timesteps for each joint,
+\item temporal cross-attention from the noisy query sequence to the conditioning memory.
+\end{enumerate}
+
+If the hidden tensor entering block $\ell$ is denoted by $X^{(\ell-1)}$, then the block first applies
+\[
+X \leftarrow \mathrm{FiLM}_{\mathrm{spatial}}(X^{(\ell-1)}, e_t),
+\]
+followed by self-attention over the joint axis. It then applies
+\[
+X \leftarrow \mathrm{FiLM}_{\mathrm{temporal}}(X, e_t),
+\]
+followed by self-attention over the temporal axis. Finally, it applies
+\[
+X \leftarrow \mathrm{FiLM}_{\mathrm{cross}}(X, e_t),
+\]
+followed by temporal cross-attention with the conditioning memory $M$.
+
+Each attention submodule uses pre-layer normalization, residual connections, and a feedforward MLP with expansion factor $4$ and GELU nonlinearity.
+
+\subsection{Output Projection}
+
+After the last block, the hidden states are normalized and projected back to $3$ coordinates per non-wrist joint:
+\[
+\hat{v}_{\mathrm{free}} \in \mathbb{R}^{B \times T_{\mathrm{out}} \times (N-1) \times 3}.
+\]
+After flattening,
+\[
+\hat{v}_{\mathrm{free}} \in \mathbb{R}^{B \times T_{\mathrm{out}} \times F_{\mathrm{free}}}.
+\]
+
+\section{Training Procedure}
+
+\subsection{Two-Phase Training}
+
+Training is split into two phases:
+
+\begin{enumerate}
+\item coarse training for $100$ epochs,
+\item diffusion training for $200$ additional epochs.
+\end{enumerate}
+
+During the coarse phase, the coarse forecaster is trained with supervised MPJPE loss against the full future target. Since
+\[
+\texttt{twostage\_coarse\_target\_lowpass\_only} = \texttt{false},
+\]
+the target is not low-pass filtered during this phase.
+
+During the diffusion phase, the optimization objective switches to diffusion loss only. The coarse prediction is still computed and used as conditioning, but the training signal is no longer an MPJPE on the refined output.
+
+\subsection{Coarse Module Behavior During Diffusion}
+
+Although the configuration sets
+\[
+\texttt{twostage\_freeze\_coarse} = \texttt{false},
+\]
+the coarse module is not updated immediately at the start of diffusion training. The diffusion optimizer starts with diffusion parameters only, and the coarse module is added back after a warmup of
+\[
+25
+\]
+diffusion epochs, using a smaller learning rate.
+
+\subsection{Diffusion Loss}
+
+With the current default configuration, the diffusion loss is the mean squared error on $v$:
+\[
+\mathcal{L}_{\mathrm{diff}} = \mathbb{E}\left[\| \hat{v} - v \|_2^2\right].
+\]
+The Mahalanobis-weighted variant is available as an alternative configuration.
+
+\section{Inference}
+
+At inference time, the coarse forecast $\hat{Y}^{c}$ is produced first. The diffusion model then samples a residual over the non-wrist joints using deterministic DDIM with $25$ reverse steps. The initial sample is drawn from the same structured Gaussian prior:
+\[
+x_T \sim \mathcal{N}(0,\Sigma).
+\]
+
+At each reverse step, the denoiser predicts $\hat{v}$ and reconstructs
+\[
+\hat{x}_0 = \sqrt{\bar{\alpha}_t}\,x_t - \sqrt{1-\bar{\alpha}_t}\,\hat{v},
+\]
+along with the corresponding noise estimate
+\[
+\hat{\eta} = \sqrt{1-\bar{\alpha}_t}\,x_t + \sqrt{\bar{\alpha}_t}\,\hat{v}.
+\]
+Because inference is deterministic by default, the DDIM update uses $\eta = 0$.
+
+After the final reverse step, the predicted non-wrist residual is restored to the full hand by inserting zeros at the wrist location. The final prediction is
+\[
+\hat{Y} = \hat{Y}^{c} + \hat{R}.
+\]
+The implementation then explicitly sets the wrist trajectory to zero:
+\[
+\hat{Y}_{:, :, w, :} = 0.
+\]
+
+\end{document}

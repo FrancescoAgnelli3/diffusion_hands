@@ -212,6 +212,8 @@ def run_experiment(
         ("twostage_mobility_depth3plus_var", train_cfg.twostage_mobility_depth3plus_var, float),
         ("twostage_graph_edge_strength", train_cfg.twostage_graph_edge_strength, float),
         ("twostage_graph_two_hop_strength", train_cfg.twostage_graph_two_hop_strength, float),
+        ("twostage_graph_laplacian_strength", train_cfg.twostage_graph_laplacian_strength, float),
+        ("twostage_graph_laplacian_tau", train_cfg.twostage_graph_laplacian_tau, float),
         ("twostage_covariance_jitter", train_cfg.twostage_covariance_jitter, float),
     ]
     for key, value, caster in twostage_fields:

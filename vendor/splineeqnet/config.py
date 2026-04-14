@@ -159,6 +159,8 @@ class TrainCfg:
     twostage_mobility_depth3plus_var: Optional[float] = None
     twostage_graph_edge_strength: Optional[float] = None
     twostage_graph_two_hop_strength: Optional[float] = None
+    twostage_graph_laplacian_strength: Optional[float] = None
+    twostage_graph_laplacian_tau: Optional[float] = None
     twostage_covariance_jitter: Optional[float] = None
 
 

@@ -728,6 +728,8 @@ def train(
         mobility_depth3plus_var = float(config.get("twostage_mobility_depth3plus_var", 1.00))
         graph_edge_strength = float(config.get("twostage_graph_edge_strength", 0.22))
         graph_two_hop_strength = float(config.get("twostage_graph_two_hop_strength", 0.05))
+        graph_laplacian_strength = float(config.get("twostage_graph_laplacian_strength", 0.5))
+        graph_laplacian_tau = float(config.get("twostage_graph_laplacian_tau", 1.0))
         covariance_jitter = float(config.get("twostage_covariance_jitter", 1e-4))
         twostage_use_mamp_condition = bool(config.get("twostage_use_mamp_condition", False))
         twostage_use_mamp_condition_coarse = bool(config.get("twostage_use_mamp_condition_coarse", False))
@@ -808,6 +810,8 @@ def train(
             mobility_depth3plus_var=mobility_depth3plus_var,
             graph_edge_strength=graph_edge_strength,
             graph_two_hop_strength=graph_two_hop_strength,
+            graph_laplacian_strength=graph_laplacian_strength,
+            graph_laplacian_tau=graph_laplacian_tau,
             covariance_jitter=covariance_jitter,
             simlpe_use_norm=bool(config.get("simlpe_use_norm", True)),
             simlpe_spatial_fc_only=bool(config.get("simlpe_spatial_fc_only", False)),

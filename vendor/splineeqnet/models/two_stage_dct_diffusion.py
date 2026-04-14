@@ -126,8 +126,10 @@ class TwoStageDCTDiffusionConfig:
     mobility_depth1_var: float = 0.35
     mobility_depth2_var: float = 0.70
     mobility_depth3plus_var: float = 1.00
-    graph_edge_strength: float = 0.6
-    graph_two_hop_strength: float = 0.2
+    graph_edge_strength: float = 0.0
+    graph_two_hop_strength: float = 0.0
+    graph_laplacian_strength: float = 0.5
+    graph_laplacian_tau: float = 1.0
     covariance_jitter: float = 1e-4
 
     @property
@@ -558,6 +560,8 @@ class HandKinematicCovariance:
         depth3plus_var: float,
         edge_strength: float,
         two_hop_strength: float,
+        laplacian_strength: float,
+        laplacian_tau: float,
         jitter: float,
     ) -> None:
         self.num_nodes = int(num_nodes)
@@ -569,10 +573,14 @@ class HandKinematicCovariance:
         self.depth3plus_var = float(depth3plus_var)
         self.edge_strength = float(edge_strength)
         self.two_hop_strength = float(two_hop_strength)
+        self.laplacian_strength = float(laplacian_strength)
+        self.laplacian_tau = float(laplacian_tau)
         self.jitter = float(jitter)
 
         if not (0 <= self.wrist_index < self.num_nodes):
             raise ValueError(f"Invalid wrist_index={self.wrist_index} for num_nodes={self.num_nodes}")
+        if self.laplacian_tau < 0.0:
+            raise ValueError(f"laplacian_tau must be non-negative, got {self.laplacian_tau}")
 
         self.free_indices = [i for i in range(self.num_nodes) if i != self.wrist_index]
         self.orig_to_free = {orig: k for k, orig in enumerate(self.free_indices)}
@@ -639,20 +647,59 @@ class HandKinematicCovariance:
         A2 = torch.maximum(A2, A2.t())
         return A1, A2
 
+    def _adjacency_kernel_free(self) -> torch.Tensor:
+        Nf = self.num_free_nodes
+        A1, A2 = self._free_graph_matrices()
+        kernel = torch.eye(Nf, dtype=torch.float32)
+        if self.edge_strength != 0.0:
+            kernel = kernel + self.edge_strength * A1
+        if self.two_hop_strength != 0.0:
+            kernel = kernel + self.two_hop_strength * A2
+        return 0.5 * (kernel + kernel.t())
+
+    def _normalized_laplacian_free(self) -> torch.Tensor:
+        Nf = self.num_free_nodes
+        A1, _ = self._free_graph_matrices()
+        deg = A1.sum(dim=1)
+        inv_sqrt_deg = torch.zeros_like(deg)
+        mask = deg > 0
+        inv_sqrt_deg[mask] = deg[mask].rsqrt()
+        D_inv_sqrt = torch.diag(inv_sqrt_deg)
+        eye = torch.eye(Nf, dtype=torch.float32)
+        lap = eye - D_inv_sqrt @ A1 @ D_inv_sqrt
+        return 0.5 * (lap + lap.t())
+
+    def _normalize_kernel_diagonal(self, kernel: torch.Tensor) -> torch.Tensor:
+        diag = torch.diagonal(kernel)
+        scale = torch.rsqrt(torch.clamp(diag, min=self.jitter))
+        kernel = scale.unsqueeze(1) * kernel * scale.unsqueeze(0)
+        kernel = 0.5 * (kernel + kernel.t())
+        kernel.fill_diagonal_(1.0)
+        return kernel
+
+    def _laplacian_heat_kernel_free(self) -> torch.Tensor:
+        lap = self._normalized_laplacian_free()
+        eigvals, eigvecs = torch.linalg.eigh(lap)
+        heat_eigvals = torch.exp(-self.laplacian_tau * eigvals)
+        heat = eigvecs @ torch.diag(heat_eigvals) @ eigvecs.t()
+        heat = 0.5 * (heat + heat.t())
+        return self._normalize_kernel_diagonal(heat)
+
     def build_feature_covariance(self) -> torch.Tensor:
         Nf = self.num_free_nodes
         if Nf <= 0:
             raise ValueError("No free joints available after removing wrist.")
         node_vars = self._node_variances_free()
         D_half = torch.diag(torch.sqrt(node_vars))
-        A1, A2 = self._free_graph_matrices()
-        C = torch.eye(Nf, dtype=torch.float32)
-        if self.edge_strength != 0.0:
-            C = C + self.edge_strength * A1
-        if self.two_hop_strength != 0.0:
-            C = C + self.two_hop_strength * A2
-        C = 0.5 * (C + C.t())
-        Sigma_node = D_half @ C @ D_half
+        eye = torch.eye(Nf, dtype=torch.float32)
+        kernel = self._adjacency_kernel_free()
+        if self.laplacian_strength != 0.0:
+            heat = self._laplacian_heat_kernel_free()
+            # Preserve the hand-zone variances on the diagonal while adding
+            # Laplacian-aware correlations through the off-diagonal structure.
+            kernel = kernel + self.laplacian_strength * (heat - eye)
+        kernel = 0.5 * (kernel + kernel.t())
+        Sigma_node = D_half @ kernel @ D_half
         Sigma_node = 0.5 * (Sigma_node + Sigma_node.t())
         eigvals = torch.linalg.eigvalsh(Sigma_node)
         min_eig = float(eigvals.min().item())
@@ -660,8 +707,6 @@ class HandKinematicCovariance:
             Sigma_node = Sigma_node + (abs(min_eig) + self.jitter) * torch.eye(Nf, dtype=torch.float32)
         else:
             Sigma_node = Sigma_node + self.jitter * torch.eye(Nf, dtype=torch.float32)
-        tr = float(torch.trace(Sigma_node).item())
-        # Sigma_node = Sigma_node * (Nf / max(tr, 1e-12))
         Sigma_feat = torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
         Sigma_feat = 0.5 * (Sigma_feat + Sigma_feat.t())
         eigvals_feat = torch.linalg.eigvalsh(Sigma_feat)
@@ -703,6 +748,8 @@ class TimeResidualConditionalDiffusion(nn.Module):
                 depth3plus_var=cfg.mobility_depth3plus_var,
                 edge_strength=cfg.graph_edge_strength,
                 two_hop_strength=cfg.graph_two_hop_strength,
+                laplacian_strength=cfg.graph_laplacian_strength,
+                laplacian_tau=cfg.graph_laplacian_tau,
                 jitter=cfg.covariance_jitter,
             )
             cov = cov_builder.build_feature_covariance()

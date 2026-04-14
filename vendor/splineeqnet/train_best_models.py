@@ -236,6 +236,10 @@ def _build_train_cfg(
     cfg.twostage_mobility_depth3plus_var = _coerce_optional(best_cfg.get("twostage_mobility_depth3plus_var"), float)
     cfg.twostage_graph_edge_strength = _coerce_optional(best_cfg.get("twostage_graph_edge_strength"), float)
     cfg.twostage_graph_two_hop_strength = _coerce_optional(best_cfg.get("twostage_graph_two_hop_strength"), float)
+    cfg.twostage_graph_laplacian_strength = _coerce_optional(
+        best_cfg.get("twostage_graph_laplacian_strength"), float
+    )
+    cfg.twostage_graph_laplacian_tau = _coerce_optional(best_cfg.get("twostage_graph_laplacian_tau"), float)
     cfg.twostage_covariance_jitter = _coerce_optional(best_cfg.get("twostage_covariance_jitter"), float)
     return cfg
 

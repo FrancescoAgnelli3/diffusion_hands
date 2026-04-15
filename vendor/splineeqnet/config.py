@@ -53,6 +53,10 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_diffusion_epochs": 500,
         "twostage_diffusion_steps": 100,
         "twostage_ddim_steps": 50,
+        "twostage_beta_matrix_mode": "scalar",
+        "twostage_beta_matrix_power": 1.0,
+        "twostage_beta_matrix_min_rate": 0.5,
+        "twostage_beta_matrix_max_rate": 2.0,
         "twostage_denoiser_dim": 256,
         "twostage_denoiser_depth": 6,
         "twostage_denoiser_heads": 8,
@@ -134,6 +138,10 @@ class TrainCfg:
     twostage_k_low: Optional[int] = None
     twostage_diffusion_steps: Optional[int] = None
     twostage_ddim_steps: Optional[int] = None
+    twostage_beta_matrix_mode: Optional[str] = None
+    twostage_beta_matrix_power: Optional[float] = None
+    twostage_beta_matrix_min_rate: Optional[float] = None
+    twostage_beta_matrix_max_rate: Optional[float] = None
     twostage_denoiser_dim: Optional[int] = None
     twostage_denoiser_depth: Optional[int] = None
     twostage_denoiser_heads: Optional[int] = None

@@ -102,6 +102,10 @@ class TwoStageDCTDiffusionConfig:
     diffusion_steps: int = 100
     ddim_steps: int = 50
     beta_schedule: str = "cosine"  # "cosine" or "linear"
+    beta_matrix_mode: str = "scalar"  # "scalar" or "spectral_vpred"
+    beta_matrix_power: float = 1.0
+    beta_matrix_min_rate: float = 0.5
+    beta_matrix_max_rate: float = 2.0
 
     # Denoiser architecture
     denoiser_dim: int = 256
@@ -258,6 +262,12 @@ class DiffusionSchedule:
             betas = torch.clip(betas, 1e-8, 0.999).float()
             return betas
         raise ValueError(f"Unknown beta schedule: {schedule}")
+
+
+def _index_schedule_rows(table: torch.Tensor, timesteps: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    if timesteps.ndim != 1:
+        timesteps = timesteps.view(-1)
+    return torch.index_select(table, 0, timesteps).to(device=timesteps.device, dtype=dtype)
 
 
 # ----------------------------- Denoiser (factorized ST with joint tokens) -----
@@ -723,6 +733,17 @@ class TimeResidualConditionalDiffusion(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.schedule = DiffusionSchedule(cfg.diffusion_steps, cfg.beta_schedule)
+        self.beta_matrix_mode = str(cfg.beta_matrix_mode).lower()
+        if self.beta_matrix_mode not in {"scalar", "spectral_vpred"}:
+            raise ValueError(
+                f"Unsupported beta_matrix_mode={cfg.beta_matrix_mode!r}. "
+                "Expected 'scalar' or 'spectral_vpred'."
+            )
+        self.use_spectral_vpred = self.beta_matrix_mode == "spectral_vpred"
+        if self.use_spectral_vpred and cfg.diffusion_loss_type != "mse":
+            raise ValueError(
+                "spectral_vpred beta matrices currently support diffusion_loss_type='mse' only."
+            )
 
         metadata = dict(metadata or {})
         if "wrist_index" not in metadata:
@@ -758,9 +779,34 @@ class TimeResidualConditionalDiffusion(nn.Module):
 
         chol = torch.linalg.cholesky(cov)
         inv_chol = torch.inverse(chol)
+        eigvals, eigvecs = torch.linalg.eigh(cov)
+        eigvals = torch.clamp(eigvals, min=max(cfg.covariance_jitter, 1e-8))
+        mean_eig = torch.clamp(eigvals.mean(), min=max(cfg.covariance_jitter, 1e-8))
+        mode_rates = torch.pow(eigvals / mean_eig, cfg.beta_matrix_power)
+        mode_rates = torch.clamp(
+            mode_rates,
+            min=float(cfg.beta_matrix_min_rate),
+            max=float(cfg.beta_matrix_max_rate),
+        )
+        spectral_alpha_bars = torch.pow(
+            self.schedule.alpha_bars.unsqueeze(1).to(torch.float32),
+            mode_rates.unsqueeze(0),
+        )
+        spectral_alpha_bars = torch.clamp(spectral_alpha_bars, min=1e-8, max=1.0)
+        spectral_alpha_bars_prev = torch.cat(
+            [torch.ones(1, self.free_feature_dim, dtype=torch.float32), spectral_alpha_bars[:-1]],
+            dim=0,
+        )
+        spectral_alphas = torch.clamp(spectral_alpha_bars / spectral_alpha_bars_prev, min=1e-8, max=0.999999)
         self.register_buffer("cov_base", cov.to(torch.float32), persistent=True)
         self.register_buffer("cov_base_chol", chol.to(torch.float32), persistent=True)
         self.register_buffer("cov_base_inv_chol", inv_chol.to(torch.float32), persistent=True)
+        self.register_buffer("beta_basis", eigvecs.to(torch.float32), persistent=True)
+        self.register_buffer("beta_basis_t", eigvecs.t().to(torch.float32), persistent=True)
+        self.register_buffer("beta_mode_eigvals", eigvals.to(torch.float32), persistent=True)
+        self.register_buffer("beta_mode_rates", mode_rates.to(torch.float32), persistent=True)
+        self.register_buffer("spectral_alpha_bars", spectral_alpha_bars.to(torch.float32), persistent=True)
+        self.register_buffer("spectral_alphas", spectral_alphas.to(torch.float32), persistent=True)
         self.denoiser = MRTimeTransformerDenoiser(
             in_feat=self.free_feature_dim,
             t_in=cfg.input_length,
@@ -799,6 +845,20 @@ class TimeResidualConditionalDiffusion(nn.Module):
             self.schedule.sqrt_one_minus_alpha_bars.to(device=device, dtype=dtype),
         )
 
+    def _spectral_schedule_rows(
+        self, timesteps: torch.Tensor, dtype: torch.dtype
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        alpha_bars = _index_schedule_rows(self.spectral_alpha_bars, timesteps, dtype)
+        return alpha_bars, torch.sqrt(alpha_bars), torch.sqrt(torch.clamp(1.0 - alpha_bars, min=0.0))
+
+    def _to_spectral(self, x: torch.Tensor) -> torch.Tensor:
+        basis = self.beta_basis.to(device=x.device, dtype=x.dtype)
+        return torch.matmul(x, basis)
+
+    def _from_spectral(self, z: torch.Tensor) -> torch.Tensor:
+        basis_t = self.beta_basis_t.to(device=z.device, dtype=z.dtype)
+        return torch.matmul(z, basis_t)
+
     def training_loss(
         self,
         *,
@@ -817,17 +877,27 @@ class TimeResidualConditionalDiffusion(nn.Module):
         coarse_free = self._flatten_free(coarse_future_full, self.cfg.pred_length, "coarse_future_full")
         x0 = residual_gt_free.float()
         device = residual_gt_free.device
-        _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._schedule_tensors(device, x0.dtype)
-
         t = torch.randint(0, self.cfg.diffusion_steps, (B,), device=device, dtype=torch.long)
-        eps = torch.randn_like(x0)
-        chol = self.cov_base_chol.to(device=device, dtype=x0.dtype)
-        inv_chol = self.cov_base_inv_chol.to(device=device, dtype=x0.dtype)
-        eta = torch.matmul(eps, chol.t())
-        sqrt_ab = sqrt_alpha_bars[t].view(B, 1, 1)
-        sqrt_omb = sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
-        x_t = sqrt_ab * x0 + sqrt_omb * eta
-        v = sqrt_ab * eta - sqrt_omb * x0
+        if self.use_spectral_vpred:
+            x0_z = self._to_spectral(x0)
+            eps_z = torch.randn_like(x0_z)
+            _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._spectral_schedule_rows(t, x0.dtype)
+            sqrt_ab = sqrt_alpha_bars.unsqueeze(1)
+            sqrt_omb = sqrt_one_minus_alpha_bars.unsqueeze(1)
+            x_t_z = sqrt_ab * x0_z + sqrt_omb * eps_z
+            v_z = sqrt_ab * eps_z - sqrt_omb * x0_z
+            x_t = self._from_spectral(x_t_z)
+            v = self._from_spectral(v_z)
+        else:
+            _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._schedule_tensors(device, x0.dtype)
+            eps = torch.randn_like(x0)
+            chol = self.cov_base_chol.to(device=device, dtype=x0.dtype)
+            inv_chol = self.cov_base_inv_chol.to(device=device, dtype=x0.dtype)
+            eta = torch.matmul(eps, chol.t())
+            sqrt_ab = sqrt_alpha_bars[t].view(B, 1, 1)
+            sqrt_omb = sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
+            x_t = sqrt_ab * x0 + sqrt_omb * eta
+            v = sqrt_ab * eta - sqrt_omb * x0
 
         v_hat = self.denoiser(
             x_t.to(dtype=history_free.dtype),
@@ -838,7 +908,9 @@ class TimeResidualConditionalDiffusion(nn.Module):
         ).float()
 
         err = v_hat - v
-        if self.cfg.diffusion_loss_type == "mahalanobis_mse":
+        if self.use_spectral_vpred:
+            v_loss = torch.mean(err ** 2)
+        elif self.cfg.diffusion_loss_type == "mahalanobis_mse":
             err_w = torch.matmul(err, inv_chol.t())
             v_loss = torch.mean(err_w ** 2)
         elif self.cfg.diffusion_loss_type == "mse":
@@ -878,24 +950,33 @@ class TimeResidualConditionalDiffusion(nn.Module):
 
         gen = torch.Generator(device=device)
         gen.manual_seed(int(seed))
-        x = torch.randn(
-            (B, self.cfg.pred_length, self.free_feature_dim),
-            device=device, dtype=torch.float32, generator=gen,
-        )
-        x = torch.matmul(x, self.cov_base_chol.to(device=device, dtype=x.dtype).t())
-
         T = self.cfg.diffusion_steps
         t_seq = _make_ddim_timesteps(T, steps, device=device)
-        alpha_bars, _, _ = self._schedule_tensors(device, x.dtype)
         clip = float(self.cfg.x0_clip)
         score = torch.zeros(B, device=device, dtype=torch.float32) if return_score else None
+
+        if self.use_spectral_vpred:
+            x = torch.randn(
+                (B, self.cfg.pred_length, self.free_feature_dim),
+                device=device, dtype=torch.float32, generator=gen,
+            )
+            alpha_init, _, sqrt_omb_init = self._spectral_schedule_rows(
+                torch.full((B,), int(t_seq[0].item()), device=device, dtype=torch.long),
+                x.dtype,
+            )
+            del alpha_init
+            x = self._from_spectral(sqrt_omb_init.unsqueeze(1) * x)
+        else:
+            x = torch.randn(
+                (B, self.cfg.pred_length, self.free_feature_dim),
+                device=device, dtype=torch.float32, generator=gen,
+            )
+            x = torch.matmul(x, self.cov_base_chol.to(device=device, dtype=x.dtype).t())
+            alpha_bars, _, _ = self._schedule_tensors(device, x.dtype)
 
         for idx in range(t_seq.numel()):
             t_int = int(t_seq[idx].item())
             t_batch = torch.full((B,), t_int, device=device, dtype=torch.long)
-            ab_t = alpha_bars[t_int]
-            sqrt_ab_t = torch.sqrt(ab_t)
-            sqrt_omb_t = torch.sqrt(1.0 - ab_t)
 
             x_input = x.to(dtype=history_free.dtype)
 
@@ -903,29 +984,69 @@ class TimeResidualConditionalDiffusion(nn.Module):
                 x_input, t_batch, history_free, coarse_free, mamp_feat=mamp_feat,
             ).float()
 
-            x0 = sqrt_ab_t * x - sqrt_omb_t * v_hat
-            if clip > 0.0:
-                x0 = torch.clamp(x0, -clip, clip)
-            eta_hat = sqrt_omb_t * x + sqrt_ab_t * v_hat
-            if score is not None:
-                score = score + eta_hat.float().pow(2).sum(dim=(1, 2))
+            if self.use_spectral_vpred:
+                _, sqrt_alpha_bars_t, sqrt_one_minus_alpha_bars_t = self._spectral_schedule_rows(t_batch, x.dtype)
+                sqrt_ab_t = sqrt_alpha_bars_t.unsqueeze(1)
+                sqrt_omb_t = sqrt_one_minus_alpha_bars_t.unsqueeze(1)
+                x_z = self._to_spectral(x)
+                v_hat_z = self._to_spectral(v_hat)
+                x0_z = sqrt_ab_t * x_z - sqrt_omb_t * v_hat_z
+                x0 = self._from_spectral(x0_z)
+                if clip > 0.0:
+                    x0 = torch.clamp(x0, -clip, clip)
+                    x0_z = self._to_spectral(x0)
+                eps_hat_z = sqrt_omb_t * x_z + sqrt_ab_t * v_hat_z
+                if score is not None:
+                    score = score + eps_hat_z.float().pow(2).sum(dim=(1, 2))
 
-            if idx == t_seq.numel() - 1:
-                ab_prev = torch.tensor(1.0, device=device, dtype=x.dtype)
-            else:
-                t_prev = int(t_seq[idx + 1].item())
-                ab_prev = alpha_bars[t_prev]
-            sqrt_ab_prev = torch.sqrt(ab_prev)
-            sqrt_omb_prev = torch.sqrt(1.0 - ab_prev)
+                if idx == t_seq.numel() - 1:
+                    alpha_prev = torch.ones(B, self.free_feature_dim, device=device, dtype=x.dtype)
+                else:
+                    t_prev = torch.full((B,), int(t_seq[idx + 1].item()), device=device, dtype=torch.long)
+                    alpha_prev, _, _ = self._spectral_schedule_rows(t_prev, x.dtype)
+                sqrt_ab_prev = torch.sqrt(alpha_prev).unsqueeze(1)
+                sqrt_omb_prev = torch.sqrt(torch.clamp(1.0 - alpha_prev, min=0.0)).unsqueeze(1)
 
-            if eta != 0.0:
-                sigma = eta * torch.sqrt((1 - ab_prev) / (1 - ab_t) * (1 - ab_t / ab_prev))
-                dir_coeff = torch.sqrt(torch.clamp(sqrt_omb_prev**2 - sigma**2, min=0.0))
-                noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=gen)
-                noise = torch.matmul(noise, self.cov_base_chol.to(device=device, dtype=x.dtype).t())
-                x = sqrt_ab_prev * x0 + dir_coeff * eta_hat + sigma * noise
+                if eta != 0.0:
+                    alpha_t = torch.clamp(sqrt_ab_t.squeeze(1) ** 2, min=1e-8, max=1.0)
+                    sigma = eta * torch.sqrt(
+                        torch.clamp(
+                            (1.0 - alpha_prev) / (1.0 - alpha_t) * (1.0 - alpha_t / alpha_prev),
+                            min=0.0,
+                        )
+                    ).unsqueeze(1)
+                    dir_coeff = torch.sqrt(torch.clamp(sqrt_omb_prev ** 2 - sigma ** 2, min=0.0))
+                    noise_z = torch.randn(x_z.shape, device=x_z.device, dtype=x_z.dtype, generator=gen)
+                    x = self._from_spectral(sqrt_ab_prev * x0_z + dir_coeff * eps_hat_z + sigma * noise_z)
+                else:
+                    x = self._from_spectral(sqrt_ab_prev * x0_z + sqrt_omb_prev * eps_hat_z)
             else:
-                x = sqrt_ab_prev * x0 + sqrt_omb_prev * eta_hat
+                ab_t = alpha_bars[t_int]
+                sqrt_ab_t = torch.sqrt(ab_t)
+                sqrt_omb_t = torch.sqrt(1.0 - ab_t)
+                x0 = sqrt_ab_t * x - sqrt_omb_t * v_hat
+                if clip > 0.0:
+                    x0 = torch.clamp(x0, -clip, clip)
+                eta_hat = sqrt_omb_t * x + sqrt_ab_t * v_hat
+                if score is not None:
+                    score = score + eta_hat.float().pow(2).sum(dim=(1, 2))
+
+                if idx == t_seq.numel() - 1:
+                    ab_prev = torch.tensor(1.0, device=device, dtype=x.dtype)
+                else:
+                    t_prev = int(t_seq[idx + 1].item())
+                    ab_prev = alpha_bars[t_prev]
+                sqrt_ab_prev = torch.sqrt(ab_prev)
+                sqrt_omb_prev = torch.sqrt(1.0 - ab_prev)
+
+                if eta != 0.0:
+                    sigma = eta * torch.sqrt((1 - ab_prev) / (1 - ab_t) * (1 - ab_t / ab_prev))
+                    dir_coeff = torch.sqrt(torch.clamp(sqrt_omb_prev**2 - sigma**2, min=0.0))
+                    noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=gen)
+                    noise = torch.matmul(noise, self.cov_base_chol.to(device=device, dtype=x.dtype).t())
+                    x = sqrt_ab_prev * x0 + dir_coeff * eta_hat + sigma * noise
+                else:
+                    x = sqrt_ab_prev * x0 + sqrt_omb_prev * eta_hat
 
         out_free = x.to(dtype=history_full.dtype)
         out_full = self._restore_full_from_free(out_free, self.cfg.pred_length, history_full.dtype)

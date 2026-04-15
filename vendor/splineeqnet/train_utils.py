@@ -705,6 +705,10 @@ def train(
         k_low = int(config.get("twostage_k_low", 16))
         diff_steps = int(config.get("twostage_diffusion_steps", 100))
         ddim_steps = int(config.get("twostage_ddim_steps", 50))
+        beta_matrix_mode = str(config.get("twostage_beta_matrix_mode", "scalar"))
+        beta_matrix_power = float(config.get("twostage_beta_matrix_power", 1.0))
+        beta_matrix_min_rate = float(config.get("twostage_beta_matrix_min_rate", 0.5))
+        beta_matrix_max_rate = float(config.get("twostage_beta_matrix_max_rate", 2.0))
         d_model = int(config.get("twostage_denoiser_dim", 256))
         depth = int(config.get("twostage_denoiser_depth", 6))
         n_heads = int(config.get("twostage_denoiser_heads", 8))
@@ -794,6 +798,10 @@ def train(
             k_low=k_low,
             diffusion_steps=diff_steps,
             ddim_steps=ddim_steps,
+            beta_matrix_mode=beta_matrix_mode,
+            beta_matrix_power=beta_matrix_power,
+            beta_matrix_min_rate=beta_matrix_min_rate,
+            beta_matrix_max_rate=beta_matrix_max_rate,
             denoiser_dim=d_model,
             denoiser_depth=depth,
             denoiser_heads=n_heads,

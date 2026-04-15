@@ -205,6 +205,14 @@ def _build_train_cfg(
     cfg.twostage_k_low = _coerce_optional(best_cfg.get("twostage_k_low"), int)
     cfg.twostage_diffusion_steps = _coerce_optional(best_cfg.get("twostage_diffusion_steps"), int)
     cfg.twostage_ddim_steps = _coerce_optional(best_cfg.get("twostage_ddim_steps"), int)
+    cfg.twostage_beta_matrix_mode = _coerce_optional(best_cfg.get("twostage_beta_matrix_mode"), str)
+    cfg.twostage_beta_matrix_power = _coerce_optional(best_cfg.get("twostage_beta_matrix_power"), float)
+    cfg.twostage_beta_matrix_min_rate = _coerce_optional(
+        best_cfg.get("twostage_beta_matrix_min_rate"), float
+    )
+    cfg.twostage_beta_matrix_max_rate = _coerce_optional(
+        best_cfg.get("twostage_beta_matrix_max_rate"), float
+    )
     cfg.twostage_denoiser_dim = _coerce_optional(best_cfg.get("twostage_denoiser_dim"), int)
     cfg.twostage_denoiser_depth = _coerce_optional(best_cfg.get("twostage_denoiser_depth"), int)
     cfg.twostage_denoiser_heads = _coerce_optional(best_cfg.get("twostage_denoiser_heads"), int)

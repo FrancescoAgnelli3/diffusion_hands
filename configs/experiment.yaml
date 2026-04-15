@@ -16,12 +16,12 @@ preprocessing:
 # Use one dataset via `dataset`, or multiple datasets via `datasets`.
 # When `datasets` is set, each dataset is processed sequentially:
 # load data -> train/eval all enabled models -> next dataset.
-# dataset: assembly
-datasets: [assembly, h2o, fpha, bighands]
+dataset: assembly
+# datasets: [assembly, h2o, fpha, bighands]
 # Use one action as a string, or multiple assembly actions as a list.
 # If empty, defaults to pick_up_screwd only for assembly.
-# action_filter: ["pick_up_screwd"]
-action_filter: ["remove", "rotate", "unscrew", "attempt", "pick", "put"]
+action_filter: ["pick_up_screwd"]
+# action_filter: ["remove", "rotate", "unscrew", "attempt", "pick", "put"]
 
 models:
   twostage_dct_diffusion:

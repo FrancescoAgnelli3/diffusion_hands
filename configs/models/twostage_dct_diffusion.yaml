@@ -24,10 +24,16 @@ defaults:
   twostage_diffusion_epochs: 200
   twostage_diffusion_steps: 50
   twostage_ddim_steps: 25
-  twostage_beta_matrix_mode: spectral_vpred
+  twostage_isotropic_noise: false
   twostage_beta_matrix_power: 1.0
   twostage_beta_matrix_min_rate: 0.5
   twostage_beta_matrix_max_rate: 2.0
+  twostage_mobility_palm_var: 0.15
+  twostage_mobility_depth1_var: 0.35
+  twostage_mobility_depth2_var: 0.70
+  twostage_mobility_depth3plus_var: 1.00
+  twostage_graph_laplacian_alpha: 0.0
+  twostage_graph_laplacian_beta: 1.0
   twostage_denoiser_dim: 128
   twostage_denoiser_depth: 6
   twostage_denoiser_heads: 4
@@ -41,4 +47,3 @@ defaults:
   twostage_use_mamp_condition_coarse: false
   twostage_mpjpe_weight: 0.0
   twostage_coarse_target_lowpass_only: false
-  twostage_diffusion_loss_type: mse # spectral_vpred beta matrices currently require mse

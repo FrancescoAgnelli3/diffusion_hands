@@ -81,19 +81,7 @@ models:
     <<: *twostage_ablation_base
     notes: "ablation: replace hand-structured diffusion noise with isotropic noise"
     defaults:
-      twostage_mobility_palm_var: 1.0
-      twostage_mobility_depth1_var: 1.0
-      twostage_mobility_depth2_var: 1.0
-      twostage_mobility_depth3plus_var: 1.0
-      twostage_graph_edge_strength: 0.0
-      twostage_graph_two_hop_strength: 0.0
-      twostage_covariance_jitter: 0.0
-
-  twostage_anisotropic_plain_mse:
-    <<: *twostage_ablation_base
-    notes: "ablation: keep anisotropic forward noise but use plain MSE diffusion loss instead of Mahalanobis-whitened MSE"
-    defaults:
-      twostage_diffusion_loss_type: mse
+      twostage_isotropic_noise: true
 
   # DCT coarse budget ablations around baseline k_low=60
   twostage_klow_40:

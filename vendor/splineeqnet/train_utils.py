@@ -705,15 +705,20 @@ def train(
         k_low = int(config.get("twostage_k_low", 16))
         diff_steps = int(config.get("twostage_diffusion_steps", 100))
         ddim_steps = int(config.get("twostage_ddim_steps", 50))
-        beta_matrix_mode = str(config.get("twostage_beta_matrix_mode", "scalar"))
+        isotropic_noise = bool(config.get("twostage_isotropic_noise", False))
         beta_matrix_power = float(config.get("twostage_beta_matrix_power", 1.0))
         beta_matrix_min_rate = float(config.get("twostage_beta_matrix_min_rate", 0.5))
         beta_matrix_max_rate = float(config.get("twostage_beta_matrix_max_rate", 2.0))
+        mobility_palm_var = float(config.get("twostage_mobility_palm_var", 0.15))
+        mobility_depth1_var = float(config.get("twostage_mobility_depth1_var", 0.35))
+        mobility_depth2_var = float(config.get("twostage_mobility_depth2_var", 0.70))
+        mobility_depth3plus_var = float(config.get("twostage_mobility_depth3plus_var", 1.00))
+        graph_laplacian_alpha = float(config.get("twostage_graph_laplacian_alpha", 0.0))
+        graph_laplacian_beta = float(config.get("twostage_graph_laplacian_beta", 1.0))
         d_model = int(config.get("twostage_denoiser_dim", 256))
         depth = int(config.get("twostage_denoiser_depth", 6))
         n_heads = int(config.get("twostage_denoiser_heads", 8))
         p_drop = float(config.get("twostage_dropout", 0.0))
-        diffusion_loss_type = str(config.get("twostage_diffusion_loss_type", "mahalanobis_mse"))
         freeze_coarse = bool(config.get("twostage_freeze_coarse", True))
         # If coarse is frozen, keep it frozen during diffusion.
         # Only allow diffusion-stage coarse updates when freeze_coarse is false.
@@ -726,13 +731,6 @@ def train(
         cond_use_coarse = bool(config.get("twostage_cond_use_coarse", True))
         allow_no_conditioning = bool(config.get("twostage_allow_no_conditioning", False))
         coarse_target_lowpass_only = bool(config.get("twostage_coarse_target_lowpass_only", False))
-        mobility_palm_var = float(config.get("twostage_mobility_palm_var", 0.15))
-        mobility_depth1_var = float(config.get("twostage_mobility_depth1_var", 0.35))
-        mobility_depth2_var = float(config.get("twostage_mobility_depth2_var", 0.70))
-        mobility_depth3plus_var = float(config.get("twostage_mobility_depth3plus_var", 1.00))
-        graph_edge_strength = float(config.get("twostage_graph_edge_strength", 0.22))
-        graph_two_hop_strength = float(config.get("twostage_graph_two_hop_strength", 0.05))
-        graph_laplacian_strength = float(config.get("twostage_graph_laplacian_strength", 0.5))
         graph_laplacian_tau = float(config.get("twostage_graph_laplacian_tau", 1.0))
         covariance_jitter = float(config.get("twostage_covariance_jitter", 1e-4))
         twostage_use_mamp_condition = bool(config.get("twostage_use_mamp_condition", False))
@@ -783,10 +781,11 @@ def train(
                     i, j = j, i
                 twostage_links.append((int(i), int(j)))
         twostage_links = sorted(set(twostage_links))
-        if not twostage_links:
+        if not twostage_links and not isotropic_noise:
             raise ValueError(
                 "twostage requires non-empty hand links. "
-                "Provide config['twostage_links'] or ensure edge_index/adjacency includes hand edges."
+                "Provide config['twostage_links'], ensure edge_index/adjacency includes hand edges, "
+                "or enable twostage_isotropic_noise."
             )
 
         tw_cfg = TwoStageDCTDiffusionConfig(
@@ -798,10 +797,16 @@ def train(
             k_low=k_low,
             diffusion_steps=diff_steps,
             ddim_steps=ddim_steps,
-            beta_matrix_mode=beta_matrix_mode,
+            isotropic_noise=isotropic_noise,
             beta_matrix_power=beta_matrix_power,
             beta_matrix_min_rate=beta_matrix_min_rate,
             beta_matrix_max_rate=beta_matrix_max_rate,
+            mobility_palm_var=mobility_palm_var,
+            mobility_depth1_var=mobility_depth1_var,
+            mobility_depth2_var=mobility_depth2_var,
+            mobility_depth3plus_var=mobility_depth3plus_var,
+            graph_laplacian_alpha=graph_laplacian_alpha,
+            graph_laplacian_beta=graph_laplacian_beta,
             denoiser_dim=d_model,
             denoiser_depth=depth,
             denoiser_heads=n_heads,
@@ -811,14 +816,6 @@ def train(
             cond_use_coarse=cond_use_coarse,
             allow_no_conditioning=allow_no_conditioning,
             coarse_target_lowpass_only=coarse_target_lowpass_only,
-            diffusion_loss_type=diffusion_loss_type,
-            mobility_palm_var=mobility_palm_var,
-            mobility_depth1_var=mobility_depth1_var,
-            mobility_depth2_var=mobility_depth2_var,
-            mobility_depth3plus_var=mobility_depth3plus_var,
-            graph_edge_strength=graph_edge_strength,
-            graph_two_hop_strength=graph_two_hop_strength,
-            graph_laplacian_strength=graph_laplacian_strength,
             graph_laplacian_tau=graph_laplacian_tau,
             covariance_jitter=covariance_jitter,
             simlpe_use_norm=bool(config.get("simlpe_use_norm", True)),

@@ -53,10 +53,16 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_diffusion_epochs": 500,
         "twostage_diffusion_steps": 100,
         "twostage_ddim_steps": 50,
-        "twostage_beta_matrix_mode": "scalar",
+        "twostage_isotropic_noise": False,
         "twostage_beta_matrix_power": 1.0,
         "twostage_beta_matrix_min_rate": 0.5,
         "twostage_beta_matrix_max_rate": 2.0,
+        "twostage_mobility_palm_var": 0.15,
+        "twostage_mobility_depth1_var": 0.35,
+        "twostage_mobility_depth2_var": 0.70,
+        "twostage_mobility_depth3plus_var": 1.00,
+        "twostage_graph_laplacian_alpha": 0.0,
+        "twostage_graph_laplacian_beta": 1.0,
         "twostage_denoiser_dim": 256,
         "twostage_denoiser_depth": 6,
         "twostage_denoiser_heads": 8,
@@ -138,15 +144,20 @@ class TrainCfg:
     twostage_k_low: Optional[int] = None
     twostage_diffusion_steps: Optional[int] = None
     twostage_ddim_steps: Optional[int] = None
-    twostage_beta_matrix_mode: Optional[str] = None
+    twostage_isotropic_noise: Optional[bool] = None
     twostage_beta_matrix_power: Optional[float] = None
     twostage_beta_matrix_min_rate: Optional[float] = None
     twostage_beta_matrix_max_rate: Optional[float] = None
+    twostage_mobility_palm_var: Optional[float] = None
+    twostage_mobility_depth1_var: Optional[float] = None
+    twostage_mobility_depth2_var: Optional[float] = None
+    twostage_mobility_depth3plus_var: Optional[float] = None
+    twostage_graph_laplacian_alpha: Optional[float] = None
+    twostage_graph_laplacian_beta: Optional[float] = None
     twostage_denoiser_dim: Optional[int] = None
     twostage_denoiser_depth: Optional[int] = None
     twostage_denoiser_heads: Optional[int] = None
     twostage_dropout: Optional[float] = None
-    twostage_diffusion_loss_type: Optional[str] = None
     twostage_freeze_coarse: Optional[bool] = None
     twostage_diffusion_coarse_warmup_epochs: Optional[int] = None
     twostage_cond_use_history: Optional[bool] = None
@@ -161,13 +172,6 @@ class TrainCfg:
     twostage_mamp_motion_aware_tau: Optional[float] = None
     twostage_mpjpe_weight: Optional[float] = None
     twostage_coarse_target_lowpass_only: Optional[bool] = None
-    twostage_mobility_palm_var: Optional[float] = None
-    twostage_mobility_depth1_var: Optional[float] = None
-    twostage_mobility_depth2_var: Optional[float] = None
-    twostage_mobility_depth3plus_var: Optional[float] = None
-    twostage_graph_edge_strength: Optional[float] = None
-    twostage_graph_two_hop_strength: Optional[float] = None
-    twostage_graph_laplacian_strength: Optional[float] = None
     twostage_graph_laplacian_tau: Optional[float] = None
     twostage_covariance_jitter: Optional[float] = None
 

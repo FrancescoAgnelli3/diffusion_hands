@@ -205,7 +205,7 @@ def _build_train_cfg(
     cfg.twostage_k_low = _coerce_optional(best_cfg.get("twostage_k_low"), int)
     cfg.twostage_diffusion_steps = _coerce_optional(best_cfg.get("twostage_diffusion_steps"), int)
     cfg.twostage_ddim_steps = _coerce_optional(best_cfg.get("twostage_ddim_steps"), int)
-    cfg.twostage_beta_matrix_mode = _coerce_optional(best_cfg.get("twostage_beta_matrix_mode"), str)
+    cfg.twostage_isotropic_noise = _coerce_optional(best_cfg.get("twostage_isotropic_noise"), bool)
     cfg.twostage_beta_matrix_power = _coerce_optional(best_cfg.get("twostage_beta_matrix_power"), float)
     cfg.twostage_beta_matrix_min_rate = _coerce_optional(
         best_cfg.get("twostage_beta_matrix_min_rate"), float
@@ -213,11 +213,22 @@ def _build_train_cfg(
     cfg.twostage_beta_matrix_max_rate = _coerce_optional(
         best_cfg.get("twostage_beta_matrix_max_rate"), float
     )
+    cfg.twostage_mobility_palm_var = _coerce_optional(best_cfg.get("twostage_mobility_palm_var"), float)
+    cfg.twostage_mobility_depth1_var = _coerce_optional(best_cfg.get("twostage_mobility_depth1_var"), float)
+    cfg.twostage_mobility_depth2_var = _coerce_optional(best_cfg.get("twostage_mobility_depth2_var"), float)
+    cfg.twostage_mobility_depth3plus_var = _coerce_optional(
+        best_cfg.get("twostage_mobility_depth3plus_var"), float
+    )
+    cfg.twostage_graph_laplacian_alpha = _coerce_optional(
+        best_cfg.get("twostage_graph_laplacian_alpha"), float
+    )
+    cfg.twostage_graph_laplacian_beta = _coerce_optional(
+        best_cfg.get("twostage_graph_laplacian_beta"), float
+    )
     cfg.twostage_denoiser_dim = _coerce_optional(best_cfg.get("twostage_denoiser_dim"), int)
     cfg.twostage_denoiser_depth = _coerce_optional(best_cfg.get("twostage_denoiser_depth"), int)
     cfg.twostage_denoiser_heads = _coerce_optional(best_cfg.get("twostage_denoiser_heads"), int)
     cfg.twostage_dropout = _coerce_optional(best_cfg.get("twostage_dropout"), float)
-    cfg.twostage_diffusion_loss_type = _coerce_optional(best_cfg.get("twostage_diffusion_loss_type"), str)
     cfg.twostage_freeze_coarse = _coerce_optional(best_cfg.get("twostage_freeze_coarse"), bool)
     cfg.twostage_diffusion_coarse_warmup_epochs = _coerce_optional(
         best_cfg.get("twostage_diffusion_coarse_warmup_epochs"), int
@@ -237,15 +248,6 @@ def _build_train_cfg(
     cfg.twostage_mpjpe_weight = _coerce_optional(best_cfg.get("twostage_mpjpe_weight"), float)
     cfg.twostage_coarse_target_lowpass_only = _coerce_optional(
         best_cfg.get("twostage_coarse_target_lowpass_only"), bool
-    )
-    cfg.twostage_mobility_palm_var = _coerce_optional(best_cfg.get("twostage_mobility_palm_var"), float)
-    cfg.twostage_mobility_depth1_var = _coerce_optional(best_cfg.get("twostage_mobility_depth1_var"), float)
-    cfg.twostage_mobility_depth2_var = _coerce_optional(best_cfg.get("twostage_mobility_depth2_var"), float)
-    cfg.twostage_mobility_depth3plus_var = _coerce_optional(best_cfg.get("twostage_mobility_depth3plus_var"), float)
-    cfg.twostage_graph_edge_strength = _coerce_optional(best_cfg.get("twostage_graph_edge_strength"), float)
-    cfg.twostage_graph_two_hop_strength = _coerce_optional(best_cfg.get("twostage_graph_two_hop_strength"), float)
-    cfg.twostage_graph_laplacian_strength = _coerce_optional(
-        best_cfg.get("twostage_graph_laplacian_strength"), float
     )
     cfg.twostage_graph_laplacian_tau = _coerce_optional(best_cfg.get("twostage_graph_laplacian_tau"), float)
     cfg.twostage_covariance_jitter = _coerce_optional(best_cfg.get("twostage_covariance_jitter"), float)

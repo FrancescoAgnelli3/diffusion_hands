@@ -102,7 +102,7 @@ class TwoStageDCTDiffusionConfig:
     diffusion_steps: int = 100
     ddim_steps: int = 50
     beta_schedule: str = "cosine"  # "cosine" or "linear"
-    beta_matrix_mode: str = "scalar"  # "scalar" or "spectral_vpred"
+    isotropic_noise: bool = False
     beta_matrix_power: float = 1.0
     beta_matrix_min_rate: float = 0.5
     beta_matrix_max_rate: float = 2.0
@@ -120,20 +120,18 @@ class TwoStageDCTDiffusionConfig:
     cond_use_coarse: bool = True
     allow_no_conditioning: bool = False
     coarse_target_lowpass_only: bool = False
-    diffusion_loss_type: str = "mahalanobis_mse"
 
     # Sampling stabilizers
     x0_clip: float = 0  # clip x0_hat in normalized space (0 disables)
 
-    # Wrist-anchored covariance knobs
+    # Heat-kernel covariance knobs
     mobility_palm_var: float = 0.15
     mobility_depth1_var: float = 0.35
     mobility_depth2_var: float = 0.70
     mobility_depth3plus_var: float = 1.00
-    graph_edge_strength: float = 0.0
-    graph_two_hop_strength: float = 0.0
-    graph_laplacian_strength: float = 0.5
     graph_laplacian_tau: float = 1.0
+    graph_laplacian_alpha: float = 0.0
+    graph_laplacian_beta: float = 1.0
     covariance_jitter: float = 1e-4
 
     @property
@@ -568,11 +566,9 @@ class HandKinematicCovariance:
         depth1_var: float,
         depth2_var: float,
         depth3plus_var: float,
-        edge_strength: float,
-        two_hop_strength: float,
-        laplacian_strength: float,
         laplacian_tau: float,
-        jitter: float,
+        laplacian_alpha: float,
+        laplacian_beta: float,
     ) -> None:
         self.num_nodes = int(num_nodes)
         self.wrist_index = int(wrist_index)
@@ -581,19 +577,20 @@ class HandKinematicCovariance:
         self.depth1_var = float(depth1_var)
         self.depth2_var = float(depth2_var)
         self.depth3plus_var = float(depth3plus_var)
-        self.edge_strength = float(edge_strength)
-        self.two_hop_strength = float(two_hop_strength)
-        self.laplacian_strength = float(laplacian_strength)
         self.laplacian_tau = float(laplacian_tau)
-        self.jitter = float(jitter)
+        self.laplacian_alpha = float(laplacian_alpha)
+        self.laplacian_beta = float(laplacian_beta)
 
         if not (0 <= self.wrist_index < self.num_nodes):
             raise ValueError(f"Invalid wrist_index={self.wrist_index} for num_nodes={self.num_nodes}")
         if self.laplacian_tau < 0.0:
             raise ValueError(f"laplacian_tau must be non-negative, got {self.laplacian_tau}")
+        if self.laplacian_alpha < 0.0:
+            raise ValueError(f"laplacian_alpha must be non-negative, got {self.laplacian_alpha}")
+        if self.laplacian_beta < 0.0:
+            raise ValueError(f"laplacian_beta must be non-negative, got {self.laplacian_beta}")
 
         self.free_indices = [i for i in range(self.num_nodes) if i != self.wrist_index]
-        self.orig_to_free = {orig: k for k, orig in enumerate(self.free_indices)}
         self.num_free_nodes = len(self.free_indices)
 
     def _make_adjacency_full(self) -> List[List[int]]:
@@ -606,6 +603,16 @@ class HandKinematicCovariance:
             if i not in adj[j]:
                 adj[j].append(i)
         return adj
+
+    def _adjacency_matrix_full(self) -> torch.Tensor:
+        A1 = torch.zeros(self.num_nodes, self.num_nodes, dtype=torch.float32)
+        full_adj = self._make_adjacency_full()
+        for i_orig in range(self.num_nodes):
+            for j_orig in full_adj[i_orig]:
+                A1[i_orig, j_orig] = 1.0
+        A1 = torch.maximum(A1, A1.t())
+        A1.fill_diagonal_(0.0)
+        return A1
 
     def _dist_from_wrist(self) -> List[int]:
         adj = self._make_adjacency_full()
@@ -637,93 +644,33 @@ class HandKinematicCovariance:
                 vars_free.append(self.depth3plus_var)
         return torch.tensor(vars_free, dtype=torch.float32)
 
-    def _free_graph_matrices(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        Nf = self.num_free_nodes
-        A1 = torch.zeros(Nf, Nf, dtype=torch.float32)
-        full_adj = self._make_adjacency_full()
-        for i_orig in self.free_indices:
-            i_free = self.orig_to_free[i_orig]
-            for j_orig in full_adj[i_orig]:
-                if j_orig == self.wrist_index:
-                    continue
-                j_free = self.orig_to_free[j_orig]
-                A1[i_free, j_free] = 1.0
-        A1 = torch.maximum(A1, A1.t())
-        A1.fill_diagonal_(0.0)
-        A2 = ((A1 @ A1) > 0).float()
-        A2 = A2 - A1
-        A2.fill_diagonal_(0.0)
-        A2 = torch.clamp(A2, min=0.0, max=1.0)
-        A2 = torch.maximum(A2, A2.t())
-        return A1, A2
-
-    def _adjacency_kernel_free(self) -> torch.Tensor:
-        Nf = self.num_free_nodes
-        A1, A2 = self._free_graph_matrices()
-        kernel = torch.eye(Nf, dtype=torch.float32)
-        if self.edge_strength != 0.0:
-            kernel = kernel + self.edge_strength * A1
-        if self.two_hop_strength != 0.0:
-            kernel = kernel + self.two_hop_strength * A2
-        return 0.5 * (kernel + kernel.t())
-
-    def _normalized_laplacian_free(self) -> torch.Tensor:
-        Nf = self.num_free_nodes
-        A1, _ = self._free_graph_matrices()
+    def _graph_laplacian_full(self) -> torch.Tensor:
+        A1 = self._adjacency_matrix_full()
         deg = A1.sum(dim=1)
         inv_sqrt_deg = torch.zeros_like(deg)
         mask = deg > 0
         inv_sqrt_deg[mask] = deg[mask].rsqrt()
         D_inv_sqrt = torch.diag(inv_sqrt_deg)
-        eye = torch.eye(Nf, dtype=torch.float32)
-        lap = eye - D_inv_sqrt @ A1 @ D_inv_sqrt
-        return 0.5 * (lap + lap.t())
+        eye = torch.eye(self.num_nodes, dtype=torch.float32)
+        normalized_adjacency = D_inv_sqrt @ A1 @ D_inv_sqrt
+        normalized_laplacian = eye - normalized_adjacency
+        return self.laplacian_alpha * eye + self.laplacian_beta * normalized_laplacian
 
-    def _normalize_kernel_diagonal(self, kernel: torch.Tensor) -> torch.Tensor:
-        diag = torch.diagonal(kernel)
-        scale = torch.rsqrt(torch.clamp(diag, min=self.jitter))
-        kernel = scale.unsqueeze(1) * kernel * scale.unsqueeze(0)
-        kernel = 0.5 * (kernel + kernel.t())
-        kernel.fill_diagonal_(1.0)
-        return kernel
-
-    def _laplacian_heat_kernel_free(self) -> torch.Tensor:
-        lap = self._normalized_laplacian_free()
+    def _laplacian_heat_kernel_full(self) -> torch.Tensor:
+        lap = self._graph_laplacian_full()
         eigvals, eigvecs = torch.linalg.eigh(lap)
         heat_eigvals = torch.exp(-self.laplacian_tau * eigvals)
-        heat = eigvecs @ torch.diag(heat_eigvals) @ eigvecs.t()
-        heat = 0.5 * (heat + heat.t())
-        return self._normalize_kernel_diagonal(heat)
+        return eigvecs @ torch.diag(heat_eigvals) @ eigvecs.t()
 
     def build_feature_covariance(self) -> torch.Tensor:
         Nf = self.num_free_nodes
         if Nf <= 0:
             raise ValueError("No free joints available after removing wrist.")
-        node_vars = self._node_variances_free()
-        D_half = torch.diag(torch.sqrt(node_vars))
-        eye = torch.eye(Nf, dtype=torch.float32)
-        kernel = self._adjacency_kernel_free()
-        if self.laplacian_strength != 0.0:
-            heat = self._laplacian_heat_kernel_free()
-            # Preserve the hand-zone variances on the diagonal while adding
-            # Laplacian-aware correlations through the off-diagonal structure.
-            kernel = kernel + self.laplacian_strength * (heat - eye)
-        kernel = 0.5 * (kernel + kernel.t())
-        Sigma_node = D_half @ kernel @ D_half
-        Sigma_node = 0.5 * (Sigma_node + Sigma_node.t())
-        eigvals = torch.linalg.eigvalsh(Sigma_node)
-        min_eig = float(eigvals.min().item())
-        if min_eig <= 0.0:
-            Sigma_node = Sigma_node + (abs(min_eig) + self.jitter) * torch.eye(Nf, dtype=torch.float32)
-        else:
-            Sigma_node = Sigma_node + self.jitter * torch.eye(Nf, dtype=torch.float32)
-        Sigma_feat = torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
-        Sigma_feat = 0.5 * (Sigma_feat + Sigma_feat.t())
-        eigvals_feat = torch.linalg.eigvalsh(Sigma_feat)
-        min_eig_feat = float(eigvals_feat.min().item())
-        if min_eig_feat <= 0.0:
-            Sigma_feat = Sigma_feat + (abs(min_eig_feat) + self.jitter) * torch.eye(3 * Nf, dtype=torch.float32)
-        return Sigma_feat
+        Sigma_node_full = self._laplacian_heat_kernel_full()
+        Sigma_node = Sigma_node_full[self.free_indices][:, self.free_indices]
+        D_half = torch.diag(torch.sqrt(self._node_variances_free()))
+        Sigma_node = D_half @ Sigma_node @ D_half
+        return torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
 
 
 # ----------------------------- Diffusion module -------------------------------
@@ -733,17 +680,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.schedule = DiffusionSchedule(cfg.diffusion_steps, cfg.beta_schedule)
-        self.beta_matrix_mode = str(cfg.beta_matrix_mode).lower()
-        if self.beta_matrix_mode not in {"scalar", "spectral_vpred"}:
-            raise ValueError(
-                f"Unsupported beta_matrix_mode={cfg.beta_matrix_mode!r}. "
-                "Expected 'scalar' or 'spectral_vpred'."
-            )
-        self.use_spectral_vpred = self.beta_matrix_mode == "spectral_vpred"
-        if self.use_spectral_vpred and cfg.diffusion_loss_type != "mse":
-            raise ValueError(
-                "spectral_vpred beta matrices currently support diffusion_loss_type='mse' only."
-            )
 
         metadata = dict(metadata or {})
         if "wrist_index" not in metadata:
@@ -758,7 +694,11 @@ class TimeResidualConditionalDiffusion(nn.Module):
         self.num_free_nodes = len(self.free_indices)
         self.free_feature_dim = 3 * self.num_free_nodes
 
-        if self.edges and self.num_free_nodes > 0:
+        if cfg.isotropic_noise or self.num_free_nodes <= 0:
+            cov = torch.eye(max(self.free_feature_dim, 1), dtype=torch.float32)
+            if self.free_feature_dim == 0:
+                cov = cov[:0, :0]
+        elif self.edges:
             cov_builder = HandKinematicCovariance(
                 num_nodes=cfg.num_nodes,
                 wrist_index=self.wrist_index,
@@ -767,18 +707,14 @@ class TimeResidualConditionalDiffusion(nn.Module):
                 depth1_var=cfg.mobility_depth1_var,
                 depth2_var=cfg.mobility_depth2_var,
                 depth3plus_var=cfg.mobility_depth3plus_var,
-                edge_strength=cfg.graph_edge_strength,
-                two_hop_strength=cfg.graph_two_hop_strength,
-                laplacian_strength=cfg.graph_laplacian_strength,
                 laplacian_tau=cfg.graph_laplacian_tau,
-                jitter=cfg.covariance_jitter,
+                laplacian_alpha=cfg.graph_laplacian_alpha,
+                laplacian_beta=cfg.graph_laplacian_beta,
             )
             cov = cov_builder.build_feature_covariance()
         else:
             cov = torch.eye(self.free_feature_dim, dtype=torch.float32)
 
-        chol = torch.linalg.cholesky(cov)
-        inv_chol = torch.inverse(chol)
         eigvals, eigvecs = torch.linalg.eigh(cov)
         eigvals = torch.clamp(eigvals, min=max(cfg.covariance_jitter, 1e-8))
         mean_eig = torch.clamp(eigvals.mean(), min=max(cfg.covariance_jitter, 1e-8))
@@ -799,8 +735,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
         )
         spectral_alphas = torch.clamp(spectral_alpha_bars / spectral_alpha_bars_prev, min=1e-8, max=0.999999)
         self.register_buffer("cov_base", cov.to(torch.float32), persistent=True)
-        self.register_buffer("cov_base_chol", chol.to(torch.float32), persistent=True)
-        self.register_buffer("cov_base_inv_chol", inv_chol.to(torch.float32), persistent=True)
         self.register_buffer("beta_basis", eigvecs.to(torch.float32), persistent=True)
         self.register_buffer("beta_basis_t", eigvecs.t().to(torch.float32), persistent=True)
         self.register_buffer("beta_mode_eigvals", eigvals.to(torch.float32), persistent=True)
@@ -836,15 +770,6 @@ class TimeResidualConditionalDiffusion(nn.Module):
         full[:, :, self.free_indices, :] = x_free
         return full
 
-    def _schedule_tensors(
-        self, device: torch.device, dtype: torch.dtype
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return (
-            self.schedule.alpha_bars.to(device=device, dtype=dtype),
-            self.schedule.sqrt_alpha_bars.to(device=device, dtype=dtype),
-            self.schedule.sqrt_one_minus_alpha_bars.to(device=device, dtype=dtype),
-        )
-
     def _spectral_schedule_rows(
         self, timesteps: torch.Tensor, dtype: torch.dtype
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -878,26 +803,15 @@ class TimeResidualConditionalDiffusion(nn.Module):
         x0 = residual_gt_free.float()
         device = residual_gt_free.device
         t = torch.randint(0, self.cfg.diffusion_steps, (B,), device=device, dtype=torch.long)
-        if self.use_spectral_vpred:
-            x0_z = self._to_spectral(x0)
-            eps_z = torch.randn_like(x0_z)
-            _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._spectral_schedule_rows(t, x0.dtype)
-            sqrt_ab = sqrt_alpha_bars.unsqueeze(1)
-            sqrt_omb = sqrt_one_minus_alpha_bars.unsqueeze(1)
-            x_t_z = sqrt_ab * x0_z + sqrt_omb * eps_z
-            v_z = sqrt_ab * eps_z - sqrt_omb * x0_z
-            x_t = self._from_spectral(x_t_z)
-            v = self._from_spectral(v_z)
-        else:
-            _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._schedule_tensors(device, x0.dtype)
-            eps = torch.randn_like(x0)
-            chol = self.cov_base_chol.to(device=device, dtype=x0.dtype)
-            inv_chol = self.cov_base_inv_chol.to(device=device, dtype=x0.dtype)
-            eta = torch.matmul(eps, chol.t())
-            sqrt_ab = sqrt_alpha_bars[t].view(B, 1, 1)
-            sqrt_omb = sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
-            x_t = sqrt_ab * x0 + sqrt_omb * eta
-            v = sqrt_ab * eta - sqrt_omb * x0
+        x0_z = self._to_spectral(x0)
+        eps_z = torch.randn_like(x0_z)
+        _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._spectral_schedule_rows(t, x0.dtype)
+        sqrt_ab = sqrt_alpha_bars.unsqueeze(1)
+        sqrt_omb = sqrt_one_minus_alpha_bars.unsqueeze(1)
+        x_t_z = sqrt_ab * x0_z + sqrt_omb * eps_z
+        v_z = sqrt_ab * eps_z - sqrt_omb * x0_z
+        x_t = self._from_spectral(x_t_z)
+        v = self._from_spectral(v_z)
 
         v_hat = self.denoiser(
             x_t.to(dtype=history_free.dtype),
@@ -908,19 +822,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
         ).float()
 
         err = v_hat - v
-        if self.use_spectral_vpred:
-            v_loss = torch.mean(err ** 2)
-        elif self.cfg.diffusion_loss_type == "mahalanobis_mse":
-            err_w = torch.matmul(err, inv_chol.t())
-            v_loss = torch.mean(err_w ** 2)
-        elif self.cfg.diffusion_loss_type == "mse":
-            v_loss = torch.mean(err ** 2)
-        else:
-            raise ValueError(
-                f"Unsupported diffusion_loss_type={self.cfg.diffusion_loss_type!r}. "
-                "Expected 'mahalanobis_mse' or 'mse'."
-            )
-        return v_loss
+        return torch.mean(err ** 2)
 
     @torch.no_grad()
     def sample_ddim(
@@ -954,25 +856,16 @@ class TimeResidualConditionalDiffusion(nn.Module):
         t_seq = _make_ddim_timesteps(T, steps, device=device)
         clip = float(self.cfg.x0_clip)
         score = torch.zeros(B, device=device, dtype=torch.float32) if return_score else None
-
-        if self.use_spectral_vpred:
-            x = torch.randn(
-                (B, self.cfg.pred_length, self.free_feature_dim),
-                device=device, dtype=torch.float32, generator=gen,
-            )
-            alpha_init, _, sqrt_omb_init = self._spectral_schedule_rows(
-                torch.full((B,), int(t_seq[0].item()), device=device, dtype=torch.long),
-                x.dtype,
-            )
-            del alpha_init
-            x = self._from_spectral(sqrt_omb_init.unsqueeze(1) * x)
-        else:
-            x = torch.randn(
-                (B, self.cfg.pred_length, self.free_feature_dim),
-                device=device, dtype=torch.float32, generator=gen,
-            )
-            x = torch.matmul(x, self.cov_base_chol.to(device=device, dtype=x.dtype).t())
-            alpha_bars, _, _ = self._schedule_tensors(device, x.dtype)
+        x = torch.randn(
+            (B, self.cfg.pred_length, self.free_feature_dim),
+            device=device, dtype=torch.float32, generator=gen,
+        )
+        alpha_init, _, sqrt_omb_init = self._spectral_schedule_rows(
+            torch.full((B,), int(t_seq[0].item()), device=device, dtype=torch.long),
+            x.dtype,
+        )
+        del alpha_init
+        x = self._from_spectral(sqrt_omb_init.unsqueeze(1) * x)
 
         for idx in range(t_seq.numel()):
             t_int = int(t_seq[idx].item())
@@ -983,70 +876,41 @@ class TimeResidualConditionalDiffusion(nn.Module):
             v_hat = self.denoiser(
                 x_input, t_batch, history_free, coarse_free, mamp_feat=mamp_feat,
             ).float()
+            _, sqrt_alpha_bars_t, sqrt_one_minus_alpha_bars_t = self._spectral_schedule_rows(t_batch, x.dtype)
+            sqrt_ab_t = sqrt_alpha_bars_t.unsqueeze(1)
+            sqrt_omb_t = sqrt_one_minus_alpha_bars_t.unsqueeze(1)
+            x_z = self._to_spectral(x)
+            v_hat_z = self._to_spectral(v_hat)
+            x0_z = sqrt_ab_t * x_z - sqrt_omb_t * v_hat_z
+            x0 = self._from_spectral(x0_z)
+            if clip > 0.0:
+                x0 = torch.clamp(x0, -clip, clip)
+                x0_z = self._to_spectral(x0)
+            eps_hat_z = sqrt_omb_t * x_z + sqrt_ab_t * v_hat_z
+            if score is not None:
+                score = score + eps_hat_z.float().pow(2).sum(dim=(1, 2))
 
-            if self.use_spectral_vpred:
-                _, sqrt_alpha_bars_t, sqrt_one_minus_alpha_bars_t = self._spectral_schedule_rows(t_batch, x.dtype)
-                sqrt_ab_t = sqrt_alpha_bars_t.unsqueeze(1)
-                sqrt_omb_t = sqrt_one_minus_alpha_bars_t.unsqueeze(1)
-                x_z = self._to_spectral(x)
-                v_hat_z = self._to_spectral(v_hat)
-                x0_z = sqrt_ab_t * x_z - sqrt_omb_t * v_hat_z
-                x0 = self._from_spectral(x0_z)
-                if clip > 0.0:
-                    x0 = torch.clamp(x0, -clip, clip)
-                    x0_z = self._to_spectral(x0)
-                eps_hat_z = sqrt_omb_t * x_z + sqrt_ab_t * v_hat_z
-                if score is not None:
-                    score = score + eps_hat_z.float().pow(2).sum(dim=(1, 2))
-
-                if idx == t_seq.numel() - 1:
-                    alpha_prev = torch.ones(B, self.free_feature_dim, device=device, dtype=x.dtype)
-                else:
-                    t_prev = torch.full((B,), int(t_seq[idx + 1].item()), device=device, dtype=torch.long)
-                    alpha_prev, _, _ = self._spectral_schedule_rows(t_prev, x.dtype)
-                sqrt_ab_prev = torch.sqrt(alpha_prev).unsqueeze(1)
-                sqrt_omb_prev = torch.sqrt(torch.clamp(1.0 - alpha_prev, min=0.0)).unsqueeze(1)
-
-                if eta != 0.0:
-                    alpha_t = torch.clamp(sqrt_ab_t.squeeze(1) ** 2, min=1e-8, max=1.0)
-                    sigma = eta * torch.sqrt(
-                        torch.clamp(
-                            (1.0 - alpha_prev) / (1.0 - alpha_t) * (1.0 - alpha_t / alpha_prev),
-                            min=0.0,
-                        )
-                    ).unsqueeze(1)
-                    dir_coeff = torch.sqrt(torch.clamp(sqrt_omb_prev ** 2 - sigma ** 2, min=0.0))
-                    noise_z = torch.randn(x_z.shape, device=x_z.device, dtype=x_z.dtype, generator=gen)
-                    x = self._from_spectral(sqrt_ab_prev * x0_z + dir_coeff * eps_hat_z + sigma * noise_z)
-                else:
-                    x = self._from_spectral(sqrt_ab_prev * x0_z + sqrt_omb_prev * eps_hat_z)
+            if idx == t_seq.numel() - 1:
+                alpha_prev = torch.ones(B, self.free_feature_dim, device=device, dtype=x.dtype)
             else:
-                ab_t = alpha_bars[t_int]
-                sqrt_ab_t = torch.sqrt(ab_t)
-                sqrt_omb_t = torch.sqrt(1.0 - ab_t)
-                x0 = sqrt_ab_t * x - sqrt_omb_t * v_hat
-                if clip > 0.0:
-                    x0 = torch.clamp(x0, -clip, clip)
-                eta_hat = sqrt_omb_t * x + sqrt_ab_t * v_hat
-                if score is not None:
-                    score = score + eta_hat.float().pow(2).sum(dim=(1, 2))
+                t_prev = torch.full((B,), int(t_seq[idx + 1].item()), device=device, dtype=torch.long)
+                alpha_prev, _, _ = self._spectral_schedule_rows(t_prev, x.dtype)
+            sqrt_ab_prev = torch.sqrt(alpha_prev).unsqueeze(1)
+            sqrt_omb_prev = torch.sqrt(torch.clamp(1.0 - alpha_prev, min=0.0)).unsqueeze(1)
 
-                if idx == t_seq.numel() - 1:
-                    ab_prev = torch.tensor(1.0, device=device, dtype=x.dtype)
-                else:
-                    t_prev = int(t_seq[idx + 1].item())
-                    ab_prev = alpha_bars[t_prev]
-                sqrt_ab_prev = torch.sqrt(ab_prev)
-                sqrt_omb_prev = torch.sqrt(1.0 - ab_prev)
-
-                if eta != 0.0:
-                    sigma = eta * torch.sqrt((1 - ab_prev) / (1 - ab_t) * (1 - ab_t / ab_prev))
-                    dir_coeff = torch.sqrt(torch.clamp(sqrt_omb_prev**2 - sigma**2, min=0.0))
-                    noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=gen)
-                    noise = torch.matmul(noise, self.cov_base_chol.to(device=device, dtype=x.dtype).t())
-                    x = sqrt_ab_prev * x0 + dir_coeff * eta_hat + sigma * noise
-                else:
-                    x = sqrt_ab_prev * x0 + sqrt_omb_prev * eta_hat
+            if eta != 0.0:
+                alpha_t = torch.clamp(sqrt_ab_t.squeeze(1) ** 2, min=1e-8, max=1.0)
+                sigma = eta * torch.sqrt(
+                    torch.clamp(
+                        (1.0 - alpha_prev) / (1.0 - alpha_t) * (1.0 - alpha_t / alpha_prev),
+                        min=0.0,
+                    )
+                ).unsqueeze(1)
+                dir_coeff = torch.sqrt(torch.clamp(sqrt_omb_prev ** 2 - sigma ** 2, min=0.0))
+                noise_z = torch.randn(x_z.shape, device=x_z.device, dtype=x_z.dtype, generator=gen)
+                x = self._from_spectral(sqrt_ab_prev * x0_z + dir_coeff * eps_hat_z + sigma * noise_z)
+            else:
+                x = self._from_spectral(sqrt_ab_prev * x0_z + sqrt_omb_prev * eps_hat_z)
 
         out_free = x.to(dtype=history_full.dtype)
         out_full = self._restore_full_from_free(out_free, self.cfg.pred_length, history_full.dtype)

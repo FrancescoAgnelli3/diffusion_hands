@@ -113,8 +113,8 @@ def get_multimodal_gt_full(logger, dataset_multi_test, args, cfg):
     gt_group = all_data[:, cfg.t_his:, :]
     gt_group = all_data[:, cfg.t_his:, :]
 
-    all_start_pose = all_data[:, cfg.t_his - 1, :]
-    pd = squareform(pdist(all_start_pose))
+    all_context = all_data[:, :cfg.t_his, :]
+    pd = squareform(pdist(all_context.reshape(all_context.shape[0], -1)))
     traj_gt_arr = []
     num_mult = []
     for i in range(pd.shape[0]):

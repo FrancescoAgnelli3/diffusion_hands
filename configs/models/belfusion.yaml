@@ -1,5 +1,6 @@
 model: belfusion
 enabled: true
+save_eval_samples: true
 train:
   epochs: 20
   early_stopping:

@@ -1,5 +1,6 @@
 model: twostage_dct_diffusion
 enabled: true
+save_eval_samples: true
 train:
   epochs: 100
   early_stopping:

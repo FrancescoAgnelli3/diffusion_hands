@@ -90,6 +90,28 @@ def _child_gpu_index(cfg: dict) -> int:
     return 0 if gpu_index >= 0 else gpu_index
 
 
+def _model_run_root(model_name: str, run_id: str) -> Path:
+    run_root = ROOT / "out" / "diffusion_hands_runs" / model_name / run_id
+    run_root.mkdir(parents=True, exist_ok=True)
+    return run_root
+
+
+def _maybe_model_run_root(model_name: str, run_id: str, enabled: bool) -> Optional[Path]:
+    if not enabled:
+        return None
+    return _model_run_root(model_name, run_id)
+
+
+def _vendor_model_run_root(vendor_name: str, model_name: str, run_id: str) -> Path:
+    run_root = VENDOR / vendor_name / "out" / "diffusion_hands_runs" / model_name / run_id
+    run_root.mkdir(parents=True, exist_ok=True)
+    return run_root
+
+
+def _save_eval_samples_enabled(model_cfg: dict) -> bool:
+    return bool(model_cfg.get("save_eval_samples", True))
+
+
 def _resolve_model_cfg_entry(model_name: str, entry: object, config_dir: Path) -> dict:
     entry_overrides: Dict[str, object] = {}
     if isinstance(entry, str):
@@ -295,9 +317,10 @@ def _resolve_runtime(cfg: dict) -> Dict[str, str]:
 def run_twostage(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "splineeqnet"
     mcfg = cfg.get("models", {}).get(model_name, {})
+    save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
-    run_root = wd / "out" / "diffusion_hands_runs" / model_name / run_id
-    run_root.mkdir(parents=True, exist_ok=True)
+    samples_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
+    run_root = _vendor_model_run_root("splineeqnet", model_name, run_id)
     best_cfg = deepcopy(_as_dict(mcfg.get("defaults")))
     if not best_cfg:
         raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
@@ -326,6 +349,7 @@ def run_twostage(model_name: str, dataset: str, data_dir: Path, action_filter: s
     best_json = run_root / "twostage_best_config.json"
     out_eval_base = run_root / "twostage_eval.csv"
     save_root = run_root / "checkpoints"
+    eval_examples_path = samples_root / "eval_samples.npz" if samples_root is not None else None
     with open(best_json, "w", encoding="utf-8") as f:
         json.dump({"twostage_dct_diffusion": best_cfg}, f, indent=2)
     rc = _run(
@@ -357,6 +381,8 @@ def run_twostage(model_name: str, dataset: str, data_dir: Path, action_filter: s
             "--humanmac-multimodal-threshold",
             str(cfg["humanmac_multimodal_threshold"]),
             *(["--epochs", str(int(epochs))] if epochs is not None else []),
+            *(["--save-eval-examples"] if save_eval_samples else []),
+            *(["--eval-examples-path", str(eval_examples_path)] if eval_examples_path is not None else []),
             "--results-csv",
             str(out_eval_base),
             "--save-root",
@@ -379,7 +405,10 @@ def run_twostage(model_name: str, dataset: str, data_dir: Path, action_filter: s
 def run_belfusion(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "belfusion"
     mcfg = cfg.get("models", {}).get(model_name, {})
+    save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
+    samples_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
+    run_root = _vendor_model_run_root("belfusion", model_name, run_id)
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
         raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
@@ -420,11 +449,13 @@ def run_belfusion(model_name: str, dataset: str, data_dir: Path, action_filter: 
     with tempfile.TemporaryDirectory(prefix="belfusion_") as td:
         td_path = Path(td)
         cfg_path = td_path / "belfusion.yaml"
-        out_root = td_path / "out"
+        out_root = run_root
         out_eval = out_root / "eval_stats.csv"
         template.setdefault("runtime", {})
         template["runtime"]["output_dir"] = str(out_root)
         template["runtime"]["metrics_csv"] = str(out_eval)
+        if samples_root is not None:
+            template["runtime"]["eval_samples_path"] = str(samples_root / "eval_samples.npz")
         _dump_yaml(cfg_path, template)
 
         cmd = [
@@ -454,7 +485,9 @@ def run_belfusion(model_name: str, dataset: str, data_dir: Path, action_filter: 
 def run_comusion(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "comusion"
     mcfg = cfg.get("models", {}).get(model_name, {})
+    save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
+    run_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
     cfg_id = f"dh_{run_id}_comusion"
     cfg_path = wd / "cfg" / f"{cfg_id}.yml"
     template = deepcopy(_as_dict(mcfg.get("defaults")))
@@ -496,6 +529,8 @@ def run_comusion(model_name: str, dataset: str, data_dir: Path, action_filter: s
             template["learn_specs"]["early_stopping_monitor"] = str(es_cfg.get("monitor"))
     template["logging_specs"]["model_id"] = cfg_id
     template["logging_specs"]["model_path"] = f"./results/{cfg_id}"
+    if run_root is not None:
+        template["eval_samples_path"] = str(run_root / "eval_samples.npz")
     _dump_yaml(cfg_path, template)
 
     try:
@@ -533,7 +568,9 @@ def run_comusion(model_name: str, dataset: str, data_dir: Path, action_filter: s
 def run_dlow_cvae(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "dlow"
     mcfg = cfg.get("models", {}).get(model_name, {})
+    save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
+    run_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
     cfg_id = f"dh_{run_id}_dlow_cvae"
     cfg_path = wd / "motion_pred" / "cfg" / f"{cfg_id}.yml"
     template = deepcopy(_as_dict(mcfg.get("defaults")))
@@ -572,6 +609,8 @@ def run_dlow_cvae(model_name: str, dataset: str, data_dir: Path, action_filter: 
         template["save_model_interval"] = int(save_interval)
     else:
         template["save_model_interval"] = 0
+    if run_root is not None:
+        template["eval_samples_path"] = str(run_root / "eval_samples.npz")
     _dump_yaml(cfg_path, template)
 
     rc = _run(
@@ -620,7 +659,9 @@ def run_dlow_cvae(model_name: str, dataset: str, data_dir: Path, action_filter: 
 def run_humanmac(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "humanmac"
     mcfg = cfg.get("models", {}).get(model_name, {})
+    save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
+    run_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
     cfg_id = f"dh_{run_id}_humanmac"
     cfg_path = wd / "cfg" / f"{cfg_id}.yml"
     template = deepcopy(_as_dict(mcfg.get("defaults")))
@@ -635,6 +676,7 @@ def run_humanmac(model_name: str, dataset: str, data_dir: Path, action_filter: s
     template["window_norm"] = int(pp["window_norm"]) if pp.get("window_norm") is not None else int(pp["input_n"])
     template["stride"] = int(pp["stride"])
     template["splineeqnet_root"] = str(VENDOR / "splineeqnet")
+    template["num_candidates"] = int(cfg["num_candidates"])
     template["mpjpe_best_of_k"] = int(cfg["num_candidates"])
     train_epochs = mcfg.get("train", {}).get("epochs")
     if train_epochs is not None:
@@ -672,7 +714,7 @@ def run_humanmac(model_name: str, dataset: str, data_dir: Path, action_filter: s
             str(cfg["seed"]),
             "--split_seed",
             str(cfg["seed"]),
-            "--mpjpe_best_of_k",
+            "--num_candidates",
             str(cfg["num_candidates"]),
             "--multimodal_threshold",
             str(cfg["humanmac_multimodal_threshold"]),
@@ -680,6 +722,7 @@ def run_humanmac(model_name: str, dataset: str, data_dir: Path, action_filter: s
             str(data_dir),
             "--action_filter",
             str(action_filter),
+            *(["--eval_samples_path", str(run_root / "eval_samples.npz")] if run_root is not None else []),
             "--num_epoch",
             str(num_epoch),
             "--save_model_interval",
@@ -746,7 +789,9 @@ def run_humanmac(model_name: str, dataset: str, data_dir: Path, action_filter: s
 def run_skeletondiffusion(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "skeletondiffusion"
     mcfg = cfg.get("models", {}).get(model_name, {})
+    save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
+    samples_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
     run_root = wd / "out" / "diffusion_hands_runs" / f"{model_name}_{run_id}"
     if run_root.exists():
         shutil.rmtree(run_root, ignore_errors=True)
@@ -888,10 +933,10 @@ def run_skeletondiffusion(model_name: str, dataset: str, data_dir: Path, action_
                 f"dataset.assembly_window_norm={window_norm_val}",
                 f"assembly_eval_batch_mult={int(pp['eval_batch_mult'])}",
                 f"num_samples={cfg['num_candidates']}",
-                f"assembly_mpjpe_best_of_k={cfg['num_candidates']}",
-                f"humanmac_num_candidates={cfg['num_candidates']}",
+                f"num_candidates={cfg['num_candidates']}",
                 f"humanmac_multimodal_threshold={cfg['humanmac_multimodal_threshold']}",
                 f"seed={cfg['seed']}",
+                *([f"++eval_samples_path={samples_root / 'eval_samples.npz'}"] if samples_root is not None else []),
             ]
         )
         rc = _run(eval_cmd, cwd=wd, env=_gpu_subprocess_env(cfg))
@@ -914,7 +959,10 @@ def run_skeletondiffusion(model_name: str, dataset: str, data_dir: Path, action_
 def run_gsps(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "gsps"
     mcfg = cfg.get("models", {}).get(model_name, {})
+    save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
+    samples_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
+    run_root = _vendor_model_run_root("gsps", model_name, run_id)
     template = deepcopy(_as_dict(mcfg.get("defaults")))
     if not template:
         raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
@@ -977,11 +1025,13 @@ def run_gsps(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
     with tempfile.TemporaryDirectory(prefix="gsps_") as td:
         td_path = Path(td)
         cfg_path = td_path / "gsps.yaml"
-        out_root = td_path / "out"
+        out_root = run_root
         out_eval = out_root / "eval_stats.csv"
         template.setdefault("runtime", {})
         template["runtime"]["output_dir"] = str(out_root)
         template["runtime"]["metrics_csv"] = str(out_eval)
+        if samples_root is not None:
+            template["runtime"]["eval_samples_path"] = str(samples_root / "eval_samples.npz")
         _dump_yaml(cfg_path, template)
 
         rc = _run([PYTHON, "run_gsps.py", "--config", str(cfg_path)], cwd=wd, env=_gpu_subprocess_env(cfg))

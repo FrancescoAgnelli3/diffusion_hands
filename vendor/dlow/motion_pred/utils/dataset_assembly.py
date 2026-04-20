@@ -10,6 +10,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.dataset_graphs import get_root_first_single_hand_graph
+
 
 class DatasetAssembly(Dataset):
     def __init__(
@@ -46,9 +48,9 @@ class DatasetAssembly(Dataset):
         self.subjects_split = {}
         self.subjects = [self.mode]
         self.kept_joints = np.arange(21)
-        # Root at wrist followed by the remaining local hand joints.
+        shared_graph = get_root_first_single_hand_graph(self.dataset_name)
         self.skeleton = Skeleton(
-            parents=[-1, 7, 10, 13, 16, 19, 0, 6, 0, 8, 9, 0, 11, 12, 0, 14, 15, 0, 17, 18, 0],
+            parents=list(shared_graph["parents"]),
             joints_left=[],
             joints_right=[],
         )

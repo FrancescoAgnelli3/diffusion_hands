@@ -41,6 +41,8 @@ if __name__ == '__main__':
                         help='Which SplineEqNet split to evaluate on.')
     parser.add_argument('--twostage_eval_best_of_k', type=int, default=None,
                         help='SplineEqNet-style best-of-k for stochastic eval. Mapped to HumanMAC mpjpe_best_of_k.')
+    parser.add_argument('--num_candidates', type=int, default=None,
+                        help='Canonical number of stochastic candidates used throughout the project.')
     parser.add_argument('--twostage_ddim_steps', type=int, default=None,
                         help='SplineEqNet-style DDIM steps. Mapped to HumanMAC ddim_timesteps.')
     parser.add_argument('--device', type=str,
@@ -65,6 +67,8 @@ if __name__ == '__main__':
                         help='Optional dataset directory override (used by assembly).')
     parser.add_argument('--action_filter', type=str, default=None,
                         help='Optional filename filter for dataset files (used by assembly).')
+    parser.add_argument('--eval_samples_path', type=str, default=None,
+                        help='Optional path where the first sample from each evaluation batch is saved as a compressed bundle.')
     parser.add_argument('--mpjpe_best_of_k', type=int, default=None,
                         help='Number of stochastic samples for MPJPE best-of-k evaluation.')
     parser.add_argument('--validate_last_epoch_only', type=_str2bool, default=True,
@@ -85,6 +89,8 @@ if __name__ == '__main__':
     cfg = Config(f'{args.cfg}', test=(args.mode != 'train'))
     args_dict = {k: v for k, v in vars(args).items() if v is not None}
     cfg = update_config(cfg, args_dict)
+    if args.num_candidates is not None:
+        cfg.mpjpe_best_of_k = max(1, int(args.num_candidates))
     if args.twostage_eval_best_of_k is not None and args.mpjpe_best_of_k is None:
         cfg.mpjpe_best_of_k = max(1, int(args.twostage_eval_best_of_k))
     if args.twostage_ddim_steps is not None:

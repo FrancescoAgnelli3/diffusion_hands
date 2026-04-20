@@ -6,11 +6,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-
-ASSEMBLY_HAND_GROUPS: Tuple[dict, ...] = (
-    {"wrist_index": 5, "nodes": tuple(range(0, 21))},
-    {"wrist_index": 26, "nodes": tuple(range(21, 42))},
-)
+from common.dataset_graphs import ASSEMBLY_HAND_GROUPS
 def default_action_filter(dataset: str, action_filter: str) -> str:
     if action_filter:
         return action_filter
@@ -176,4 +172,3 @@ def select_most_active_hand(
     best_hand, scale, _, local_wrist = candidates[0]
     best_hand = reorder_wrist_to_first(best_hand, local_wrist)
     return best_hand.astype(np.float32), float(scale)
-

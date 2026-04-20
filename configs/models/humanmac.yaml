@@ -1,5 +1,6 @@
 model: humanmac
 enabled: true
+save_eval_samples: true
 train:
   epochs: 200
   early_stopping:

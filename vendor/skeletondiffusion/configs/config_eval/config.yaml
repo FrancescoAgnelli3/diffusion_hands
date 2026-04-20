@@ -60,6 +60,5 @@ assembly_time_interp: null
 assembly_window_norm: null
 assembly_eval_batch_mult: 1
 assembly_split_strategy: validation # validation|test ; default keeps parity with load_best_models.py
-assembly_mpjpe_best_of_k: ${num_samples}
-humanmac_num_candidates: ${num_samples}
+num_candidates: ${num_samples}
 humanmac_multimodal_threshold: 0.5

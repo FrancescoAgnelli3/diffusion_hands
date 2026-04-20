@@ -49,13 +49,22 @@ def MMFDE(pred, target, gt_multi, *args, t0=0, t=-1):
     return _common_mmfde(pred, target, gt_multi, *args, t0=t0, t=t)
 
 
-def HUMANMAC_METRICS(pred_candidates, gt_future, start_pose, threshold=0.5):
-    return _common_humanmac_metrics(pred_candidates, gt_future, start_pose, threshold=threshold)
+def HUMANMAC_METRICS(pred_candidates, gt_future, conditioning_context, threshold=0.5):
+    return _common_humanmac_metrics(
+        pred_candidates,
+        gt_future,
+        conditioning_context=conditioning_context,
+        threshold=threshold,
+    )
 
 
-def SPLINEEQNET_DIFFUSION_BATCH_EVAL(pred_candidates, gt_future, start_pose, norm_factor, threshold=0.5):
+def SPLINEEQNET_DIFFUSION_BATCH_EVAL(pred_candidates, gt_future, conditioning_context, norm_factor, threshold=0.5):
     return _common_splineeqnet_diffusion_batch_eval(
-        pred_candidates, gt_future, start_pose, norm_factor, threshold=threshold
+        pred_candidates,
+        gt_future,
+        conditioning_context=conditioning_context,
+        norm_factor=norm_factor,
+        threshold=threshold,
     )
 
 

@@ -1,5 +1,6 @@
 model: skeletondiffusion
 enabled: true
+save_eval_samples: true
 train:
   autoencoder:
     epochs: 50
@@ -260,8 +261,7 @@ defaults:
       assembly_window_norm: null
       assembly_eval_batch_mult: 1
       assembly_split_strategy: validation
-      assembly_mpjpe_best_of_k: "${num_samples}"
-      humanmac_num_candidates: "${num_samples}"
+      num_candidates: "${num_samples}"
       humanmac_multimodal_threshold: 0.5
     task:
       history_sec: 7

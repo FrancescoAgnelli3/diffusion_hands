@@ -4,6 +4,7 @@ import csv
 import math
 import time
 import argparse
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from einops import rearrange
@@ -20,6 +21,7 @@ from utils.metrics import APD, APDE, ADE, FDE, MMADE, MMFDE, SPLINEEQNET_DIFFUSI
 from data_utils.transforms import calculate_stats, load_stats
 from data_utils.dataset_assembly import build_assembly_train_val
 from data_utils.transforms import DataAugmentation
+from common.evaluation import save_eval_samples_npz
 
 
 def generate_assembly_loss_weights(t_length, scale=10):
@@ -244,8 +246,8 @@ class Trainer(object):
             data = self._flatten_motion(data)
             all_data.append(data)
         all_data = torch.cat(all_data, dim=0).cpu().numpy()
-        all_start_pose = all_data[:,self.input_n-1,:]
-        pd = squareform(pdist(all_start_pose))
+        all_context = all_data[:, :self.input_n, :]
+        pd = squareform(pdist(all_context.reshape(all_context.shape[0], -1)))
         traj_gt_arr = []
         for i in range(pd.shape[0]):
             ind = np.nonzero(pd[i] < self.cfg.multimodal_threshold)
@@ -288,7 +290,11 @@ class Trainer(object):
             stats_meter = {x: AverageMeterTorch() for x in stats_names}
             hm_pred_batches = []
             hm_gt_batches = []
-            hm_start_pose_batches = []
+            hm_context_batches = []
+            saved_obs = []
+            saved_tgt = []
+            saved_pred = []
+            saved_pred_all = []
             total_mpjpe = 0.0
             total_mpjpe_norm = 0.0
             total_samples = 0
@@ -328,7 +334,7 @@ class Trainer(object):
                 batch_eval = SPLINEEQNET_DIFFUSION_BATCH_EVAL(
                     pred.permute(1, 0, 2, 3).contiguous(),  # [K, B, T, NC]
                     gt,
-                    data_flat[:, self.input_n - 1, :].to(self.device).to(self.dtype),
+                    data_flat.to(self.device).to(self.dtype),
                     norm_factor,
                     threshold=float(self.cfg.humanmac_multimodal_threshold),
                 )
@@ -341,7 +347,15 @@ class Trainer(object):
 
                 hm_pred_batches.append(pred.permute(1, 0, 2, 3).detach().cpu())
                 hm_gt_batches.append(gt.detach().cpu())
-                hm_start_pose_batches.append(data_flat[:, self.input_n - 1, :].detach().cpu())
+                hm_context_batches.append(data_flat.detach().cpu())
+                pred_first_all = pred[0].reshape(k, self.cfg.t_pred, -1, 3)
+                gt_first = gt[0].reshape(self.cfg.t_pred, -1, 3)
+                obs_first = data_flat[0].reshape(self.cfg.t_his, -1, 3)
+                best_idx = torch.norm(pred_first_all - gt_first.unsqueeze(0), dim=-1).mean(dim=(1, 2)).argmin()
+                saved_obs.append(obs_first.detach().cpu())
+                saved_tgt.append(gt_first.detach().cpu())
+                saved_pred.append(pred_first_all[best_idx].detach().cpu())
+                saved_pred_all.append(pred_first_all.detach().cpu())
 
                 avg_mpjpe = total_mpjpe / max(1, total_samples)
                 avg_mpjpe_norm = total_mpjpe_norm / max(1, total_samples)
@@ -356,10 +370,25 @@ class Trainer(object):
             hm_metrics = SPLINEEQNET_DIFFUSION_BATCH_EVAL(
                 torch.cat(hm_pred_batches, dim=1),
                 torch.cat(hm_gt_batches, dim=0),
-                torch.cat(hm_start_pose_batches, dim=0),
+                torch.cat(hm_context_batches, dim=0),
                 torch.ones((torch.cat(hm_gt_batches, dim=0).shape[0],), dtype=torch.float32),
                 threshold=float(self.cfg.humanmac_multimodal_threshold),
             )['humanmac']
+            eval_samples_path = getattr(self.cfg, 'eval_samples_path', '')
+            if eval_samples_path and saved_obs:
+                save_eval_samples_npz(
+                    Path(str(eval_samples_path)),
+                    obs=torch.stack(saved_obs, dim=0),
+                    target=torch.stack(saved_tgt, dim=0),
+                    pred=torch.stack(saved_pred, dim=0),
+                    pred_all=torch.stack(saved_pred_all, dim=0),
+                    metadata={
+                        'model': 'comusion',
+                        'dataset': str(getattr(self.cfg, 'dataset', '')),
+                        'action_filter': str(getattr(self.cfg, 'action_filter', '')),
+                        'num_candidates': int(k),
+                    },
+                )
             for key in ('APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID'):
                 stats_meter[key].direct_set_avg(hm_metrics[key])
             return stats_meter

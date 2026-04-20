@@ -122,7 +122,6 @@ class TrainCfg:
     bone_loss_weight: float = 0.0
     velocity_loss_weight: float = 0.0
     save_eval_examples: bool = False
-    save_eval_examples_all_k: bool = False
     save_coarse_model: bool = False
     use_space: bool = True
     early_stopping_enabled: bool = False

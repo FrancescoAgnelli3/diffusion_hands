@@ -74,6 +74,7 @@ class Config:
         self.time_interp = self.data_specs.get('time_interp', None)
         self.window_norm = self.data_specs.get('window_norm', None)
         self.splineeqnet_root = self.data_specs.get('splineeqnet_root', '/home/agnelli/projects/4D_hands_working/SplineEqNet')
+        self.eval_samples_path = cfg.get('eval_samples_path', '')
 
         # # Learning
         self.learn_specs = cfg.get('learn_specs', dict())

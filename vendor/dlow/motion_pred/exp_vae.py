@@ -17,7 +17,8 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-from common.metrics import splineeqnet_diffusion_batch_eval
+from common.evaluation import save_eval_samples_npz
+from common.metrics import humanmac_metrics, splineeqnet_diffusion_batch_eval
 
 
 def loss_function(X, Y_r, Y, mu, logvar):
@@ -63,6 +64,13 @@ def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
     model.eval()
     stats_names = ['MPJPE', 'MPJPE_NORM', 'APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID']
     stats_meter = {x: AverageMeter() for x in stats_names}
+    hm_pred_batches = []
+    hm_gt_batches = []
+    hm_context_batches = []
+    saved_obs = []
+    saved_tgt = []
+    saved_pred = []
+    saved_pred_all = []
 
     data_gen = eval_dataset.iter_generator_with_scale()
     num_samples = 0
@@ -81,27 +89,44 @@ def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
 
         pred = Y.permute(1, 0, 2).contiguous().view(data.shape[0], eval_sample_num, t_pred, -1)
         gt = traj[t_his:].permute(1, 0, 2).contiguous().view(data.shape[0], t_pred, -1)
-        start_pose = traj[t_his - 1].view(data.shape[0], -1, 3)
+        conditioning_context = traj[:t_his].permute(1, 0, 2).contiguous().view(data.shape[0], t_his, -1, 3)
         norm_factor_t = torch.as_tensor(norm_factor, device=device, dtype=torch.float32).view(-1)
 
         batch_eval = splineeqnet_diffusion_batch_eval(
             pred_candidates=pred.permute(1, 0, 2, 3).contiguous().to(dtype=torch.float32),
             gt_future=gt.to(dtype=torch.float32),
-            start_pose=start_pose.to(dtype=torch.float32),
+            conditioning_context=conditioning_context.to(dtype=torch.float32),
             norm_factor=norm_factor_t,
             threshold=float(multimodal_threshold),
         )
         per_sample_mpjpe = batch_eval['per_sample_mpjpe']
         per_sample_mpjpe_norm = batch_eval['per_sample_mpjpe_norm']
-        hm = batch_eval['humanmac']
+        hm_pred_batches.append(pred.permute(1, 0, 2, 3).contiguous().to(dtype=torch.float32).detach().cpu())
+        hm_gt_batches.append(gt.to(dtype=torch.float32).detach().cpu())
+        hm_context_batches.append(conditioning_context.to(dtype=torch.float32).detach().cpu())
+        pred_first_all = pred[0].reshape(eval_sample_num, t_pred, -1, 3)
+        gt_first = gt[0].reshape(t_pred, -1, 3)
+        obs_first = conditioning_context[0]
+        best_idx = torch.norm(pred_first_all - gt_first.unsqueeze(0), dim=-1).mean(dim=(1, 2)).argmin()
+        saved_obs.append(obs_first.detach().cpu())
+        saved_tgt.append(gt_first.detach().cpu())
+        saved_pred.append(pred_first_all[best_idx].detach().cpu())
+        saved_pred_all.append(pred_first_all.detach().cpu())
 
         stats_meter['MPJPE'].update(float(per_sample_mpjpe.mean().item()))
         stats_meter['MPJPE_NORM'].update(float(per_sample_mpjpe_norm.mean().item()))
-        for k in ('APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID'):
-            stats_meter[k].update(float(hm[k]))
 
     if num_samples == 0:
         raise RuntimeError("Assembly evaluation produced zero samples.")
+
+    hm = humanmac_metrics(
+        pred_candidates=torch.cat(hm_pred_batches, dim=1),
+        gt_future=torch.cat(hm_gt_batches, dim=0),
+        conditioning_context=torch.cat(hm_context_batches, dim=0),
+        threshold=float(multimodal_threshold),
+    )
+    for k in ('APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID'):
+        stats_meter[k].update(float(hm[k]))
 
     out_csv = os.path.join(cfg.result_dir, 'stats_1.csv')
     with open(out_csv, 'w', newline='') as csv_file:
@@ -109,6 +134,21 @@ def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
         writer.writeheader()
         for stats in stats_names:
             writer.writerow({'Metric': stats, 'vae': stats_meter[stats].avg})
+    eval_samples_path = getattr(cfg, 'eval_samples_path', '')
+    if eval_samples_path and saved_obs:
+        save_eval_samples_npz(
+            Path(str(eval_samples_path)),
+            obs=torch.stack(saved_obs, dim=0),
+            target=torch.stack(saved_tgt, dim=0),
+            pred=torch.stack(saved_pred, dim=0),
+            pred_all=torch.stack(saved_pred_all, dim=0),
+            metadata={
+                'model': 'dlow_cvae',
+                'dataset': str(getattr(cfg, 'dataset', '')),
+                'action_filter': str(getattr(cfg, 'action_filter', '')),
+                'num_candidates': int(eval_sample_num),
+            },
+        )
 
 
 if __name__ == '__main__':

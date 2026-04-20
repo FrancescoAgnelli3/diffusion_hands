@@ -22,6 +22,7 @@ _ROOT = _THIS_DIR.parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from common.evaluation import save_eval_samples_npz
 from common.metrics import humanmac_metrics_prefixed
 from models.motion_pred_ours import get_model
 from utils.util import absolute2relative_torch, get_dct_matrix
@@ -111,8 +112,8 @@ def _prepare_batch(
 
     gt_future_flat = out_nr.reshape(bsz, t_pred, -1)
     gt_total_flat = torch.cat([inp_nr, out_nr], dim=1).reshape(bsz, t_total, -1)
-    start_pose_nr = inp_nr[:, -1, :, :]
-    return inp_dct, gt_future_flat, gt_total_flat, start_pose_nr, norm_factor
+    conditioning_context_nr = inp_nr
+    return inp_dct, gt_future_flat, gt_total_flat, conditioning_context_nr, norm_factor
 
 
 def _sample_predictions(
@@ -808,10 +809,17 @@ def main() -> None:
     sum_cmd = 0.0
     sum_fid = 0.0
     total_samples = 0
+    humanmac_pred_batches = []
+    humanmac_tgt_batches = []
+    humanmac_context_batches = []
+    saved_obs = []
+    saved_tgt = []
+    saved_pred = []
+    saved_pred_all = []
 
     with torch.no_grad():
         for bidx, batch in enumerate(test_loader):
-            inp_dct, gt_future_nr_flat, _gt_total_flat, start_pose_nr, norm_factor = _prepare_batch(
+            inp_dct, gt_future_nr_flat, _gt_total_flat, conditioning_context_nr, norm_factor = _prepare_batch(
                 batch, t_his=t_his, t_pred=t_pred, n_pre=n_pre, dct_m=dct_m, device=device
             )
             bsz = int(inp_dct.shape[0])
@@ -835,47 +843,66 @@ def main() -> None:
 
             zpred = torch.zeros(bsz, nk, t_pred, 1, 3, device=device, dtype=pred_nr.dtype)
             zgt = torch.zeros(bsz, t_pred, 1, 3, device=device, dtype=gt_nr.dtype)
-            zstart = torch.zeros(bsz, 1, 3, device=device, dtype=start_pose_nr.dtype)
+            zcontext = torch.zeros(bsz, t_his, 1, 3, device=device, dtype=conditioning_context_nr.dtype)
             pred_full = torch.cat([zpred, pred_nr], dim=3)
             gt_full = torch.cat([zgt, gt_nr], dim=2)
-            start_full = torch.cat([zstart, start_pose_nr], dim=1)
+            conditioning_context_full = torch.cat([zcontext, conditioning_context_nr], dim=2)
 
             err = torch.norm(pred_full - gt_full.unsqueeze(1), dim=-1).mean(dim=(2, 3))
             best = err.min(dim=1).values
             best_norm = best * norm_factor.view(-1)
 
-            hm = humanmac_metrics_prefixed(
-                pred_candidates=pred_full.permute(1, 0, 2, 3, 4).detach().cpu(),
-                gt_future=gt_full.detach().cpu(),
-                start_pose=start_full.detach().cpu(),
-                threshold=threshold,
-            )
-
             sum_mpjpe += float(best.sum().item())
             sum_mpjpe_norm += float(best_norm.sum().item())
-            sum_apd += float(hm["humanmac_apd"]) * bsz
-            sum_ade += float(hm["humanmac_ade"]) * bsz
-            sum_fde += float(hm["humanmac_fde"]) * bsz
-            sum_mmade += float(hm["humanmac_mmade"]) * bsz
-            sum_mmfde += float(hm["humanmac_mmfde"]) * bsz
-            sum_cmd += float(hm["humanmac_cmd"]) * bsz
-            sum_fid += float(hm["humanmac_fid"]) * bsz
             total_samples += bsz
+            humanmac_pred_batches.append(pred_full.permute(1, 0, 2, 3, 4).detach().cpu())
+            humanmac_tgt_batches.append(gt_full.detach().cpu())
+            humanmac_context_batches.append(conditioning_context_full.detach().cpu())
+            pred_first_all = pred_full[0]
+            gt_first = gt_full[0]
+            obs_first = conditioning_context_full[0]
+            best_idx = torch.norm(pred_first_all - gt_first.unsqueeze(0), dim=-1).mean(dim=(1, 2)).argmin()
+            saved_obs.append(obs_first.detach().cpu())
+            saved_tgt.append(gt_first.detach().cpu())
+            saved_pred.append(pred_first_all[best_idx].detach().cpu())
+            saved_pred_all.append(pred_first_all.detach().cpu())
 
     if total_samples == 0:
         raise RuntimeError("GSPS eval produced zero test samples.")
 
+    hm = humanmac_metrics_prefixed(
+        pred_candidates=torch.cat(humanmac_pred_batches, dim=1),
+        gt_future=torch.cat(humanmac_tgt_batches, dim=0),
+        conditioning_context=torch.cat(humanmac_context_batches, dim=0),
+        threshold=threshold,
+    )
+
     metrics = {
         "MPJPE": sum_mpjpe / total_samples,
         "MPJPE_norm": sum_mpjpe_norm / total_samples,
-        "APD": sum_apd / total_samples,
-        "ADE": sum_ade / total_samples,
-        "FDE": sum_fde / total_samples,
-        "MMADE": sum_mmade / total_samples,
-        "MMFDE": sum_mmfde / total_samples,
-        "CMD": sum_cmd / total_samples,
-        "FID": sum_fid / total_samples,
+        "APD": float(hm["humanmac_apd"]),
+        "ADE": float(hm["humanmac_ade"]),
+        "FDE": float(hm["humanmac_fde"]),
+        "MMADE": float(hm["humanmac_mmade"]),
+        "MMFDE": float(hm["humanmac_mmfde"]),
+        "CMD": float(hm["humanmac_cmd"]),
+        "FID": float(hm["humanmac_fid"]),
     }
+    eval_samples_path = rcfg.get("eval_samples_path")
+    if eval_samples_path and saved_obs:
+        save_eval_samples_npz(
+            Path(str(eval_samples_path)),
+            obs=torch.stack(saved_obs, dim=0),
+            target=torch.stack(saved_tgt, dim=0),
+            pred=torch.stack(saved_pred, dim=0),
+            pred_all=torch.stack(saved_pred_all, dim=0),
+            metadata={
+                "model": "gsps",
+                "dataset": dataset,
+                "action_filter": action_filter_eff,
+                "num_candidates": int(nk),
+            },
+        )
 
     _write_metrics_csv(metrics_csv, metrics)
     print("[GSPS] eval metrics:", {k: round(v, 6) for k, v in metrics.items()})

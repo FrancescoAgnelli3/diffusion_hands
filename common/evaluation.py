@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Dict, List, Mapping
+
+import numpy as np
+import torch
 
 from common.metrics import (
     compute_all_metrics_single,
@@ -61,3 +65,42 @@ def normalize_metrics_dict(src: Mapping[str, float]) -> Dict[str, float]:
                 out[target] = float(src[cand])
                 break
     return out
+
+
+def _to_numpy_array(value):
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    else:
+        value = np.asarray(value)
+    if np.issubdtype(value.dtype, np.floating):
+        return value.astype(np.float32, copy=False)
+    return value
+
+
+def save_eval_samples_npz(
+    path: Path,
+    *,
+    obs,
+    target,
+    pred,
+    pred_all=None,
+    metadata: Mapping[str, object] | None = None,
+) -> Path:
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "obs": _to_numpy_array(obs),
+        "target": _to_numpy_array(target),
+        "pred": _to_numpy_array(pred),
+    }
+    pred_all_np = _to_numpy_array(pred_all)
+    if pred_all_np is not None:
+        payload["pred_all"] = pred_all_np
+    if metadata:
+        payload["metadata_json"] = np.asarray(json.dumps(dict(metadata), sort_keys=True))
+
+    np.savez_compressed(out_path, **payload)
+    return out_path

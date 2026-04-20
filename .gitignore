@@ -45,9 +45,12 @@ inference/
 # vendor/comusion/**
 # vendor/gsps/**
 vendor/dlow/results/
+vendor/dlow/motion_pred/cfg/
 vendor/humanmac/results/
 vendor/humanmac/inference/
+vendor/humanmac/cfg/
 vendor/skeletondiffusion/output/
+vendor/skeletondiffusion/configs/
 vendor/splineeqnet/out/
 vendor/splineeqnet/examples/models/*.pt
 vendor/mamp/output_dir/

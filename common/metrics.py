@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Sequence, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -282,14 +282,33 @@ def mmfde(
     return results
 
 
+def _resolve_conditioning_context(
+    conditioning_context: Optional[torch.Tensor] = None,
+    *,
+    start_pose: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    # Keep backward compatibility with older vendor code that still passes
+    # `start_pose` while the shared metrics layer now uses a more general name.
+    if conditioning_context is None:
+        conditioning_context = start_pose
+    if conditioning_context is None:
+        raise TypeError("Expected `conditioning_context` (or legacy alias `start_pose`).")
+    return conditioning_context
+
+
 def humanmac_metrics(
     pred_candidates: torch.Tensor,
     gt_future: torch.Tensor,
-    start_pose: torch.Tensor,
+    conditioning_context: Optional[torch.Tensor] = None,
     *,
     threshold: float = 0.5,
+    start_pose: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
-    if pred_candidates.numel() == 0 or gt_future.numel() == 0 or start_pose.numel() == 0:
+    conditioning_context = _resolve_conditioning_context(
+        conditioning_context,
+        start_pose=start_pose,
+    )
+    if pred_candidates.numel() == 0 or gt_future.numel() == 0 or conditioning_context.numel() == 0:
         return {
             "APD": float("nan"),
             "ADE": float("nan"),
@@ -304,9 +323,9 @@ def humanmac_metrics(
         pred_candidates.shape[0], pred_candidates.shape[1], pred_candidates.shape[2], -1
     ).cpu()
     gt_flat = gt_future.reshape(gt_future.shape[0], gt_future.shape[1], -1).cpu()
-    start_flat = start_pose.reshape(start_pose.shape[0], -1).cpu()
+    context_flat = conditioning_context.reshape(conditioning_context.shape[0], -1).cpu()
 
-    pairwise = torch.cdist(start_flat, start_flat)
+    pairwise = torch.cdist(context_flat, context_flat)
     apd_total = 0.0
     ade_total = 0.0
     fde_total = 0.0
@@ -354,11 +373,18 @@ def humanmac_metrics(
 def humanmac_metrics_prefixed(
     pred_candidates: torch.Tensor,
     gt_future: torch.Tensor,
-    start_pose: torch.Tensor,
+    conditioning_context: Optional[torch.Tensor] = None,
     *,
     threshold: float = 0.5,
+    start_pose: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
-    m = humanmac_metrics(pred_candidates, gt_future, start_pose, threshold=threshold)
+    m = humanmac_metrics(
+        pred_candidates,
+        gt_future,
+        conditioning_context,
+        threshold=threshold,
+        start_pose=start_pose,
+    )
     return {
         "humanmac_apd": m["APD"],
         "humanmac_ade": m["ADE"],
@@ -373,11 +399,18 @@ def humanmac_metrics_prefixed(
 def splineeqnet_diffusion_batch_eval(
     pred_candidates: torch.Tensor,
     gt_future: torch.Tensor,
-    start_pose: torch.Tensor,
-    norm_factor: torch.Tensor,
+    conditioning_context: Optional[torch.Tensor] = None,
+    norm_factor: Optional[torch.Tensor] = None,
     *,
     threshold: float = 0.5,
+    start_pose: Optional[torch.Tensor] = None,
 ) -> Dict[str, Union[torch.Tensor, Dict[str, float]]]:
+    conditioning_context = _resolve_conditioning_context(
+        conditioning_context,
+        start_pose=start_pose,
+    )
+    if norm_factor is None:
+        raise TypeError("Expected `norm_factor`.")
     if pred_candidates.dim() != 4 or gt_future.dim() != 3:
         raise ValueError("Expected pred_candidates[K,B,T,NC] and gt_future[B,T,NC].")
     if pred_candidates.shape[3] % 3 != 0:
@@ -400,7 +433,7 @@ def splineeqnet_diffusion_batch_eval(
     per_sample_mpjpe = mpjpe_terms.mean(dim=(1, 2))
     per_sample_mpjpe_norm = per_sample_mpjpe * norm_factor.view(-1).to(per_sample_mpjpe.device)
 
-    humanmac = humanmac_metrics(pred_candidates, gt_future, start_pose, threshold=threshold)
+    humanmac = humanmac_metrics(pred_candidates, gt_future, conditioning_context, threshold=threshold)
     return {
         "per_sample_mpjpe": per_sample_mpjpe,
         "per_sample_mpjpe_norm": per_sample_mpjpe_norm,

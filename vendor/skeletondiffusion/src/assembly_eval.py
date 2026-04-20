@@ -12,6 +12,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 from common.evaluation import humanmac_metrics_prefixed as _common_humanmac_metrics_prefixed  # type: ignore
+from common.evaluation import save_eval_samples_npz  # type: ignore
 
 
 def _import_splineeqnet_data_modules(splineeqnet_root: str):
@@ -38,14 +39,14 @@ def _import_splineeqnet_data_modules(splineeqnet_root: str):
 def _compute_humanmac_metrics(
     pred_candidates: torch.Tensor,
     gt_future: torch.Tensor,
-    start_pose: torch.Tensor,
+    conditioning_context: torch.Tensor,
     *,
     threshold: float,
 ) -> Dict[str, float]:
     return _common_humanmac_metrics_prefixed(
         pred_candidates=pred_candidates,
         gt_future=gt_future,
-        start_pose=start_pose,
+        conditioning_context=conditioning_context,
         threshold=threshold,
     )
 
@@ -145,17 +146,25 @@ def compute_metrics_assembly(
     skeleton = create_skeleton(**model_cfg)
     model, device, *_ = prepare_model(model_cfg, skeleton)
 
-    best_of_k = max(1, int(config.get("assembly_mpjpe_best_of_k", num_samples)))
-    humanmac_k = max(1, int(config.get("humanmac_num_candidates", num_samples)))
-    sample_k = max(best_of_k, humanmac_k)
+    num_candidates = max(
+        1,
+        int(
+            config.get(
+                "num_candidates",
+                config.get("assembly_mpjpe_best_of_k", config.get("humanmac_num_candidates", num_samples)),
+            )
+        ),
+    )
+    sample_k = num_candidates
     threshold = float(config.get("humanmac_multimodal_threshold", 0.5))
 
     total_samples = 0
     total_mpjpe = 0.0
     total_mpjpe_norm = 0.0
+    best_pred_batches = []
     humanmac_pred_batches = []
     humanmac_tgt_batches = []
-    humanmac_start_pose_batches = []
+    humanmac_context_batches = []
 
     for batch in eval_loader:
         if not isinstance(batch, (list, tuple)) or len(batch) < 3:
@@ -180,20 +189,23 @@ def compute_metrics_assembly(
                 pred_dict={"pred": pred, "obs": data, "mm_gt": None},
             )
 
-        pred_mpjpe = pred_m[:, :best_of_k]
+        pred_mpjpe = pred_m[:, :num_candidates]
         mpjpe_matrix = torch.norm(pred_mpjpe - target_m.unsqueeze(1), dim=-1).mean(dim=(2, 3))
         best_mpjpe = mpjpe_matrix.min(dim=1).values
         best_mpjpe_norm = best_mpjpe * norm_factor
+        best_idx = mpjpe_matrix.argmin(dim=1)
+        best_pred = pred_mpjpe[torch.arange(pred_mpjpe.shape[0], device=pred_mpjpe.device), best_idx]
 
         batch_size_eff = int(target_m.shape[0])
         total_samples += batch_size_eff
         total_mpjpe += float(best_mpjpe.sum().item())
         total_mpjpe_norm += float(best_mpjpe_norm.sum().item())
 
-        pred_humanmac = pred_m[:, :humanmac_k].permute(1, 0, 2, 3, 4).detach().cpu()
+        best_pred_batches.append(best_pred.detach().cpu())
+        pred_humanmac = pred_m[:, :num_candidates].permute(1, 0, 2, 3, 4).detach().cpu()
         humanmac_pred_batches.append(pred_humanmac)
         humanmac_tgt_batches.append(target_m.detach().cpu())
-        humanmac_start_pose_batches.append(data_m[:, -1, :, :].detach().cpu())
+        humanmac_context_batches.append(data_m.detach().cpu())
 
     if total_samples == 0:
         raise RuntimeError("Assembly evaluation produced zero samples.")
@@ -201,9 +213,26 @@ def compute_metrics_assembly(
     humanmac_metrics = _compute_humanmac_metrics(
         pred_candidates=torch.cat(humanmac_pred_batches, dim=1),
         gt_future=torch.cat(humanmac_tgt_batches, dim=0),
-        start_pose=torch.cat(humanmac_start_pose_batches, dim=0),
+        conditioning_context=torch.cat(humanmac_context_batches, dim=0),
         threshold=threshold,
     )
+    eval_samples_path = config.get("eval_samples_path")
+    if eval_samples_path:
+        pred_all_batches = torch.cat(humanmac_pred_batches, dim=1).permute(1, 0, 2, 3, 4).contiguous()
+        save_eval_samples_npz(
+            eval_samples_path,
+            obs=torch.cat(humanmac_context_batches, dim=0),
+            target=torch.cat(humanmac_tgt_batches, dim=0),
+            pred=torch.cat(best_pred_batches, dim=0),
+            pred_all=pred_all_batches,
+            metadata={
+                "model": str(config.get("method_name", "SkeletonDiffusion")),
+                "dataset": dataset_name,
+                "action_filter": action_filter,
+                "num_candidates": int(num_candidates),
+                "eval_split": eval_split_name,
+            },
+        )
 
     results = {
         "MPJPE": total_mpjpe / total_samples,
@@ -217,8 +246,7 @@ def compute_metrics_assembly(
         "FID": humanmac_metrics["humanmac_fid"],
         "samples": float(total_samples),
         "assembly_eval_split": eval_split_name,
-        "assembly_mpjpe_best_of_k": float(best_of_k),
-        "humanmac_num_candidates": float(humanmac_k),
+        "num_candidates": float(num_candidates),
         "humanmac_multimodal_threshold": threshold,
         # Canonical explicit split keys.
         "test_mpjpe_best": total_mpjpe / total_samples,

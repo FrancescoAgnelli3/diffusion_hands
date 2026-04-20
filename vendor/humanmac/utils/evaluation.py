@@ -12,7 +12,8 @@ from utils.script import sample_preprocessing
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-from common.metrics import distributional_motion_metrics  # type: ignore
+from common.metrics import humanmac_metrics, splineeqnet_diffusion_batch_eval  # type: ignore
+from common.evaluation import save_eval_samples_npz  # type: ignore
 
 tensor = torch.tensor
 DoubleTensor = torch.DoubleTensor
@@ -58,10 +59,8 @@ def compute_stats(diffusion, multimodal_dict, model, logger, cfg):
         pred = np.concatenate(preds, axis=0)
         return pred[None, ...]
 
-    gt_group = multimodal_dict['gt_group']
     data_group = multimodal_dict['data_group']
-    traj_gt_arr = multimodal_dict['traj_gt_arr']
-    num_samples = multimodal_dict['num_samples']
+    num_samples = int(multimodal_dict['num_samples'])
 
     stats_names = ['APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID']
     stats_meter = {x: {y: AverageMeter() for y in ['HumanMAC']} for x in stats_names}
@@ -75,31 +74,19 @@ def compute_stats(diffusion, multimodal_dict, model, logger, cfg):
         pred.append(pred_i_nd)
         if i == K - 1:  # in last iteration, concatenate all candidate pred
             pred = np.concatenate(pred, axis=0)
-            # pred [K, N, T, D]
-            pred = pred[:, :, cfg.t_his:, :]
-            # Use GPU to accelerate
-            try:
-                gt_group = torch.from_numpy(gt_group).to('cuda')
-            except:
-                pass
-            try:
-                pred = torch.from_numpy(pred).to('cuda')
-            except:
-                pass
-            # pred [50, 5187, 100, 48]
-            for j in range(0, num_samples):
-                apd, ade, fde, mmade, mmfde = compute_all_metrics(pred[:, j, :, :],
-                                                                        gt_group[j][np.newaxis, ...],
-                                                                        traj_gt_arr[j])
-                stats_meter['APD']['HumanMAC'].update(apd)
-                stats_meter['ADE']['HumanMAC'].update(ade)
-                stats_meter['FDE']['HumanMAC'].update(fde)
-                stats_meter['MMADE']['HumanMAC'].update(mmade)
-                stats_meter['MMFDE']['HumanMAC'].update(mmfde)
+            pred = torch.from_numpy(pred[:, :, cfg.t_his:, :]).to(cfg.device, dtype=torch.float32)
+            all_data = torch.from_numpy(data_group[..., 1:, :]).to(cfg.device, dtype=torch.float32)
+            gt_group = all_data[:, cfg.t_his:, :, :].reshape(all_data.shape[0], all_data.shape[1] - cfg.t_his, -1)
+            conditioning_context = all_data[:, :cfg.t_his, :, :]
 
-            motion_dist_metrics = distributional_motion_metrics(pred, gt_group)
-            stats_meter['CMD']['HumanMAC'].update(float(motion_dist_metrics['CMD']))
-            stats_meter['FID']['HumanMAC'].update(float(motion_dist_metrics['FID']))
+            metrics = humanmac_metrics(
+                pred_candidates=pred,
+                gt_future=gt_group,
+                conditioning_context=conditioning_context,
+                threshold=float(cfg.multimodal_threshold),
+            )
+            for stats in stats_names:
+                stats_meter[stats]['HumanMAC'].update(float(metrics[stats]), n=num_samples)
 
             for stats in stats_names:
                 str_stats = f'{stats}: ' + ' '.join(
@@ -189,27 +176,27 @@ def compute_mpjpe_stats(diffusion, dataset_multi_test, model, logger, cfg):
 
     data_group = np.concatenate(data_group, axis=0)
     norm_factor = np.concatenate(norm_group, axis=0)
-    gt = torch.from_numpy(data_group[..., 1:, :]).to(cfg.device, dtype=torch.float32)
-    gt_future = gt[:, cfg.t_his:, :, :]
+    all_data = torch.from_numpy(data_group[..., 1:, :]).to(cfg.device, dtype=torch.float32)
+    gt_future = all_data[:, cfg.t_his:, :, :].reshape(all_data.shape[0], all_data.shape[1] - cfg.t_his, -1)
+    conditioning_context = all_data[:, :cfg.t_his, :, :]
     norm_factor_t = torch.from_numpy(norm_factor).to(cfg.device, dtype=torch.float32).view(-1)
 
     best_of_k = EVAL_SAMPLES_PER_SEQUENCE
-    if best_of_k == 1:
+    pred_batches = []
+    for _ in range(best_of_k):
         pred = _predict_batched(data_group)
-        pred_future = pred[:, cfg.t_his:, :, :]
-        mpjpe_terms = torch.norm(pred_future - gt_future, dim=-1)
-        per_sample_mpjpe = mpjpe_terms.mean(dim=(1, 2))
-    else:
-        all_preds = []
-        for _ in range(best_of_k):
-            pred = _predict_batched(data_group)
-            all_preds.append(pred[:, cfg.t_his:, :, :])
-        stacked = torch.stack(all_preds, dim=0)  # (K, B, T, J, 3)
-        mpjpe_terms = torch.norm(stacked - gt_future.unsqueeze(0), dim=-1)
-        mpjpe_k = mpjpe_terms.mean(dim=(2, 3))  # (K, B)
-        per_sample_mpjpe = mpjpe_k.min(dim=0)[0]
+        pred_batches.append(pred[:, cfg.t_his:, :, :].reshape(pred.shape[0], pred.shape[1] - cfg.t_his, -1))
+    pred_candidates = torch.stack(pred_batches, dim=0)  # (K, B, T, NC)
 
-    per_sample_mpjpe_norm = per_sample_mpjpe * norm_factor_t
+    batch_eval = splineeqnet_diffusion_batch_eval(
+        pred_candidates=pred_candidates,
+        gt_future=gt_future,
+        conditioning_context=conditioning_context,
+        norm_factor=norm_factor_t,
+        threshold=float(cfg.multimodal_threshold),
+    )
+    per_sample_mpjpe = batch_eval['per_sample_mpjpe']
+    per_sample_mpjpe_norm = batch_eval['per_sample_mpjpe_norm']
     mpjpe = float(per_sample_mpjpe.mean().item())
     mpjpe_norm = float(per_sample_mpjpe_norm.mean().item())
     samples = int(per_sample_mpjpe.shape[0])
@@ -231,5 +218,32 @@ def compute_mpjpe_stats(diffusion, dataset_multi_test, model, logger, cfg):
     else:
         prev = pd.read_csv(file_mpjpe % cfg.result_dir)
         pd.concat([prev, row], axis=0, ignore_index=True).to_csv(file_mpjpe % cfg.result_dir, index=False)
+
+    eval_samples_path = getattr(cfg, 'eval_samples_path', '')
+    if eval_samples_path:
+        eval_bs = max(1, int(getattr(cfg, 'batch_size', 64)))
+        first_indices = torch.arange(0, gt_future.shape[0], eval_bs, device=gt_future.device)
+        pred_all = pred_candidates[:, first_indices].permute(1, 0, 2, 3).contiguous()
+        gt_first = gt_future[first_indices]
+        obs_first = conditioning_context[first_indices]
+        pred_all_reshaped = pred_all.reshape(pred_all.shape[0], pred_all.shape[1], pred_all.shape[2], -1, 3)
+        gt_first_reshaped = gt_first.reshape(gt_first.shape[0], gt_first.shape[1], -1, 3)
+        obs_first_reshaped = obs_first.reshape(obs_first.shape[0], obs_first.shape[1], -1, 3)
+        best_idx = torch.norm(pred_all_reshaped - gt_first_reshaped.unsqueeze(1), dim=-1).mean(dim=(2, 3)).argmin(dim=1)
+        batch_selector = torch.arange(pred_all_reshaped.shape[0], device=pred_all_reshaped.device)
+        pred_best = pred_all_reshaped[batch_selector, best_idx]
+        save_eval_samples_npz(
+            Path(str(eval_samples_path)),
+            obs=obs_first_reshaped,
+            target=gt_first_reshaped,
+            pred=pred_best,
+            pred_all=pred_all_reshaped,
+            metadata={
+                'model': 'humanmac',
+                'dataset': str(getattr(cfg, 'dataset', '')),
+                'action_filter': str(getattr(cfg, 'action_filter', '')),
+                'num_candidates': int(best_of_k),
+            },
+        )
 
     return {'mpjpe': mpjpe, 'mpjpe_norm': mpjpe_norm, 'samples': samples}

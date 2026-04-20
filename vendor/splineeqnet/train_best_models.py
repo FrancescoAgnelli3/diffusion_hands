@@ -162,10 +162,6 @@ def _build_train_cfg(
     best_cfg: Dict[str, object], *, epochs_override: Optional[int] = None, model_name: Optional[str] = None
 ) -> TrainCfg:
     target_model = (model_name or str(best_cfg.get("model") or "")).lower()
-    if target_model not in {"simlpe_dct", "twostage_dct_diffusion"}:
-        raise ValueError(
-            f"Unsupported model '{target_model}'. Available models: simlpe_dct, twostage_dct_diffusion."
-        )
     use_space_raw = best_cfg.get("use_space")
     use_space = bool(int(use_space_raw)) if use_space_raw not in (None, "", "None") else True
 
@@ -353,6 +349,16 @@ def main():
     ap.add_argument("--wandb-entity", type=str, default=None, help="W&B entity/team.")
     ap.add_argument("--wandb-run-prefix", type=str, default=None, help="Optional run name prefix for W&B.")
     ap.add_argument("--save-eval-examples", action="store_true", help="When set, persist evaluation examples (merged_pred/merged_tgt tensors) during validation/testing.")
+    ap.add_argument(
+        "--eval-examples-dir",
+        default="",
+        help="Optional directory where evaluation sample bundles should be written.",
+    )
+    ap.add_argument(
+        "--eval-examples-path",
+        default="",
+        help="Optional explicit output path for the evaluation sample bundle.",
+    )
     ap.add_argument("--save-coarse-model", action="store_true", help="When set, save/load the twostage coarse model weights for this configuration.")
     ap.add_argument("--save-best-model", action="store_true", help="When set, persist the best model checkpoint into the examples directory.")
     ap.add_argument(
@@ -438,6 +444,12 @@ def main():
             # Ensure the model field reflects the current target model
             train_cfg.model = model_name
             train_cfg.save_eval_examples = bool(args.save_eval_examples)
+            if args.eval_examples_path:
+                train_cfg.eval_examples_path = str(args.eval_examples_path)
+            elif args.eval_examples_dir:
+                train_cfg.eval_examples_dir = str(args.eval_examples_dir)
+            else:
+                train_cfg.eval_examples_dir = os.path.join(save_root, "eval_examples", model_name)
             train_cfg.save_coarse_model = bool(args.save_coarse_model)
             if args.twostage_use_mamp_condition:
                 train_cfg.twostage_use_mamp_condition = True
@@ -487,10 +499,9 @@ def main():
                 wandb_run_prefix=args.wandb_run_prefix,
                 save_best_model=args.save_best_model,
                 best_model_path_override=(args.checkpoint_path.strip() or None),
-                twostage_eval_best_of_k=max(1, int(args.num_candidates)),
+                num_candidates=max(1, int(args.num_candidates)),
                 twostage_eval_oracle_mpjpe=(model_name.strip().lower() == "twostage_dct_diffusion"),
                 compute_humanmac_metrics=True,
-                humanmac_num_candidates=max(1, int(args.num_candidates)),
                 humanmac_multimodal_threshold=float(args.humanmac_multimodal_threshold),
             )
             if metrics is None:

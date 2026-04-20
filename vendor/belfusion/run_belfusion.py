@@ -23,7 +23,8 @@ import sys
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.metrics import splineeqnet_diffusion_batch_eval
+from common.evaluation import save_eval_samples_npz
+from common.metrics import humanmac_metrics, splineeqnet_diffusion_batch_eval
 
 @dataclass
 class WindowSample:
@@ -233,12 +234,19 @@ def evaluate_model(
     output_n: int,
     n_nodes: int,
     device: torch.device,
+    eval_samples_path: Path | None = None,
+    metadata: Dict[str, object] | None = None,
 ) -> Dict[str, float]:
     model.eval()
     mpjpe_vals: List[torch.Tensor] = []
     mpjpe_norm_vals: List[torch.Tensor] = []
-    hm_acc = {"APD": 0.0, "ADE": 0.0, "FDE": 0.0, "MMADE": 0.0, "MMFDE": 0.0, "CMD": 0.0, "FID": 0.0}
-    n_batches = 0
+    hm_pred_batches: List[torch.Tensor] = []
+    hm_gt_batches: List[torch.Tensor] = []
+    hm_context_batches: List[torch.Tensor] = []
+    saved_obs: List[torch.Tensor] = []
+    saved_tgt: List[torch.Tensor] = []
+    saved_pred: List[torch.Tensor] = []
+    saved_pred_all: List[torch.Tensor] = []
 
     with torch.no_grad():
         for obs, fut, norm in test_loader:
@@ -251,31 +259,54 @@ def evaluate_model(
             sampled = model.sample(obs_flat, num_samples=num_samples)
             pred = sampled.reshape(num_samples, bs, output_n, n_nodes * 3)
             gt = fut.reshape(bs, output_n, n_nodes * 3)
-            start_pose = obs[:, -1, :, :]
+            conditioning_context = obs
 
             res = splineeqnet_diffusion_batch_eval(
                 pred_candidates=pred,
                 gt_future=gt,
-                start_pose=start_pose,
+                conditioning_context=conditioning_context,
                 norm_factor=norm,
                 threshold=threshold,
             )
             mpjpe_vals.append(res["per_sample_mpjpe"].detach().cpu())
             mpjpe_norm_vals.append(res["per_sample_mpjpe_norm"].detach().cpu())
-            hm = res["humanmac"]
-            for k in hm_acc:
-                hm_acc[k] += float(hm[k])
-            n_batches += 1
+            hm_pred_batches.append(pred.detach().cpu())
+            hm_gt_batches.append(gt.detach().cpu())
+            hm_context_batches.append(conditioning_context.detach().cpu())
+
+            pred_first_all = pred[:, 0].reshape(num_samples, output_n, n_nodes, 3)
+            gt_first = gt[0].reshape(output_n, n_nodes, 3)
+            obs_first = conditioning_context[0]
+            best_idx = torch.norm(pred_first_all - gt_first.unsqueeze(0), dim=-1).mean(dim=(1, 2)).argmin()
+            saved_obs.append(obs_first.detach().cpu())
+            saved_tgt.append(gt_first.detach().cpu())
+            saved_pred.append(pred_first_all[best_idx].detach().cpu())
+            saved_pred_all.append(pred_first_all.detach().cpu())
 
     if not mpjpe_vals:
         raise RuntimeError("No valid test windows were produced for BeLFusion evaluation.")
+
+    hm = humanmac_metrics(
+        pred_candidates=torch.cat(hm_pred_batches, dim=1),
+        gt_future=torch.cat(hm_gt_batches, dim=0),
+        conditioning_context=torch.cat(hm_context_batches, dim=0),
+        threshold=threshold,
+    )
 
     out = {
         "MPJPE": float(torch.cat(mpjpe_vals).mean().item()),
         "MPJPE_norm": float(torch.cat(mpjpe_norm_vals).mean().item()),
     }
-    denom = float(max(1, n_batches))
-    out.update({k: v / denom for k, v in hm_acc.items()})
+    out.update({k: float(hm[k]) for k in ("APD", "ADE", "FDE", "MMADE", "MMFDE", "CMD", "FID")})
+    if eval_samples_path is not None and saved_obs:
+        save_eval_samples_npz(
+            eval_samples_path,
+            obs=torch.stack(saved_obs, dim=0),
+            target=torch.stack(saved_tgt, dim=0),
+            pred=torch.stack(saved_pred, dim=0),
+            pred_all=torch.stack(saved_pred_all, dim=0),
+            metadata=metadata,
+        )
     return out
 
 
@@ -408,6 +439,13 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
         output_n=output_n,
         n_nodes=n_nodes,
         device=device,
+        eval_samples_path=Path(str(runtime_cfg["eval_samples_path"])) if runtime_cfg.get("eval_samples_path") else None,
+        metadata={
+            "model": "belfusion",
+            "dataset": str(data_cfg.get("dataset", "")),
+            "action_filter": str(data_cfg.get("action_filter", "")),
+            "num_candidates": int(eval_cfg["num_candidates"]),
+        },
     )
 
     out_csv = Path(str(runtime_cfg["metrics_csv"]))

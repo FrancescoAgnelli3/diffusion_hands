@@ -40,6 +40,7 @@ class Config:
         self.time_interp = cfg.get('time_interp', None)
         self.window_norm = cfg.get('window_norm', self.t_his)
         self.splineeqnet_root = cfg.get('splineeqnet_root', '')
+        self.eval_samples_path = cfg.get('eval_samples_path', '')
 
         # vae
         self.nz = cfg['nz']

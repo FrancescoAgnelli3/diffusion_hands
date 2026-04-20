@@ -59,7 +59,8 @@ def run_experiment(
     twostage_eval_collect_all: bool = False,
     twostage_eval_oracle_mpjpe: bool = False,
     compute_humanmac_metrics: bool = False,
-    humanmac_num_candidates: int = 50,
+    num_candidates: Optional[int] = None,
+    humanmac_num_candidates: Optional[int] = None,
     humanmac_multimodal_threshold: float = 0.5,
 ) -> Optional[Dict[str, float]]:
     set_global_seed(ds.seed)
@@ -69,11 +70,6 @@ def run_experiment(
     )
 
     model_key = str(train_cfg.model).strip().lower()
-    if model_key not in {"simlpe_dct", "twostage_dct_diffusion"}:
-        raise ValueError(
-            f"Unsupported model '{train_cfg.model}'. Available models in this pruned repo: "
-            "simlpe_dct, twostage_dct_diffusion"
-        )
 
     tag = (
         f"dataset={ds.dataset}__model={train_cfg.model}__hs={train_cfg.hidden_size}__gl={train_cfg.gru_layers}__"
@@ -116,7 +112,6 @@ def run_experiment(
         "use_space": bool(train_cfg.use_space),
         "velocity_loss_weight": float(train_cfg.velocity_loss_weight),
         "save_eval_examples": bool(train_cfg.save_eval_examples),
-        "save_eval_examples_all_k": bool(train_cfg.save_eval_examples_all_k),
         "log_gcn_stats": False,
         "log_wandb": bool(log_wandb),
         "dataset": ds.dataset,
@@ -148,15 +143,24 @@ def run_experiment(
         config["load_model_path"] = str(load_model_path)
     if twostage_eval_phase:
         config["twostage_eval_phase"] = str(twostage_eval_phase)
-    if twostage_eval_best_of_k is not None:
-        config["twostage_eval_best_of_k"] = max(1, int(twostage_eval_best_of_k))
+    resolved_num_candidates = None
+    if num_candidates is not None:
+        resolved_num_candidates = max(1, int(num_candidates))
+    elif twostage_eval_best_of_k is not None:
+        resolved_num_candidates = max(1, int(twostage_eval_best_of_k))
+    elif humanmac_num_candidates is not None:
+        resolved_num_candidates = max(1, int(humanmac_num_candidates))
+    if resolved_num_candidates is not None:
+        config["num_candidates"] = resolved_num_candidates
+        config["twostage_eval_best_of_k"] = resolved_num_candidates
     if twostage_eval_collect_all:
         config["twostage_eval_collect_all"] = True
     if twostage_eval_oracle_mpjpe:
         config["twostage_eval_oracle_mpjpe"] = True
     if compute_humanmac_metrics:
         config["compute_humanmac_metrics"] = True
-        config["humanmac_num_candidates"] = max(1, int(humanmac_num_candidates))
+        if resolved_num_candidates is not None:
+            config["humanmac_num_candidates"] = resolved_num_candidates
         config["humanmac_multimodal_threshold"] = float(humanmac_multimodal_threshold)
 
     if train_cfg.save_coarse_model:

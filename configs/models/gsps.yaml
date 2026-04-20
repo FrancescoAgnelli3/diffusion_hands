@@ -1,5 +1,6 @@
 model: gsps
 enabled: false
+save_eval_samples: true
 train:
   epochs: 50
   batch_size: 64

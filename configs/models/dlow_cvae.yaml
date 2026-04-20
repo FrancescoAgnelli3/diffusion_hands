@@ -1,5 +1,6 @@
 model: dlow_cvae
 enabled: true
+save_eval_samples: true
 train:
   epochs: 300
   save_model_interval: 300

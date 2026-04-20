@@ -1,5 +1,6 @@
 model: comusion
 enabled: true
+save_eval_samples: true
 train:
   epochs: 300
   early_stopping:

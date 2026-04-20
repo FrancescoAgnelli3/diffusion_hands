@@ -9,40 +9,11 @@ import numpy as np
 from data_loader.dataset import Dataset
 from data_loader.skeleton import Skeleton
 
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-ASSEMBLY_HAND_GROUPS = (
-    {"wrist_index": 5, "nodes": tuple(range(0, 21))},
-    {"wrist_index": 26, "nodes": tuple(range(21, 42))},
-)
-
-# Left-hand edge connectivity from SplineEqNet Assembly metadata (local indices, wrist=5).
-ASSEMBLY_SINGLE_HAND_LINKS_ORIG = (
-    (4, 19), (3, 16), (2, 13), (1, 10),
-    (19, 18), (16, 15), (13, 12), (10, 9),
-    (18, 17), (15, 14), (12, 11), (9, 8),
-    (17, 5), (14, 5), (11, 5), (8, 5),
-    (0, 7), (7, 6), (6, 5), (20, 5),
-    (17, 14), (14, 11), (11, 8),
-)
-
-
-def _reindex_wrist_first(old_idx):
-    # Original local indexing uses wrist=5. HumanMAC expects root at index 0.
-    if old_idx == 5:
-        return 0
-    if old_idx < 5:
-        return old_idx + 1
-    return old_idx
-
-
-def _links_wrist_first():
-    out = []
-    for a, b in ASSEMBLY_SINGLE_HAND_LINKS_ORIG:
-        out.append((_reindex_wrist_first(a), _reindex_wrist_first(b)))
-    return tuple(out)
-
-
-ASSEMBLY_SINGLE_HAND_LINKS = _links_wrist_first()
+from common.dataset_graphs import ASSEMBLY_HAND_GROUPS, get_root_first_single_hand_graph
 
 
 def _parents_from_links(num_nodes, links, root=0):
@@ -309,10 +280,9 @@ class DatasetAssembly(Dataset):
         if self.mode not in split_ds:
             raise ValueError(f"Unknown split '{self.mode}'. Expected one of train/val/test.")
 
-        # Hand tree derived from SplineEqNet Assembly links, reindexed to wrist-at-0.
-        parents = _parents_from_links(21, ASSEMBLY_SINGLE_HAND_LINKS, root=0)
+        shared_graph = get_root_first_single_hand_graph(self.dataset_name)
         self.skeleton = Skeleton(
-            parents=parents,
+            parents=list(shared_graph["parents"]),
             # Use one side list so the whole hand is rendered with one consistent color.
             joints_left=[],
             joints_right=list(range(1, 21)),

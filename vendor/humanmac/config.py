@@ -103,7 +103,7 @@ class Config:
         self.mod_test = cfg['mod_test']
 
         self.dct_norm_enable = cfg['dct_norm_enable']
-        self.mpjpe_best_of_k = cfg.get('mpjpe_best_of_k', 1)
+        self.mpjpe_best_of_k = cfg.get('num_candidates', cfg.get('mpjpe_best_of_k', 1))
         self.early_stopping_enabled = cfg.get('early_stopping_enabled', False)
         self.early_stopping_patience = cfg.get('early_stopping_patience', 20)
         self.early_stopping_min_delta = cfg.get('early_stopping_min_delta', 1e-4)

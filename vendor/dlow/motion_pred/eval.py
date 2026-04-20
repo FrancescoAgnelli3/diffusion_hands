@@ -181,8 +181,12 @@ def compute_stats():
 
 
 def compute_stats_assembly():
-    stats_names = ['MPJPE', 'MPJPE_NORM', 'APD', 'ADE', 'FDE', 'MMADE', 'MMFDE']
+    stats_names = ['MPJPE', 'MPJPE_NORM', 'APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID']
     stats_meter = {x: {y: AverageMeter() for y in algos} for x in stats_names}
+    humanmac_batches = {
+        algo: {'pred': [], 'gt': [], 'context': []}
+        for algo in algos
+    }
 
     data_gen = dataset.iter_generator_with_scale()
     num_samples = 0
@@ -192,7 +196,7 @@ def compute_stats_assembly():
         traj_np = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)
         traj = tensor(traj_np, device=device, dtype=dtype).permute(1, 0, 2).contiguous()
         gt = traj[t_his:].permute(1, 0, 2).contiguous().view(traj.shape[1], t_pred, -1, 3)
-        start_pose = traj[t_his - 1].view(traj.shape[1], -1, 3)
+        conditioning_context = traj[:t_his].permute(1, 0, 2).contiguous().view(traj.shape[1], t_his, -1, 3)
 
         for algo in algos:
             pred = get_prediction(data, algo, sample_num=eval_sample_num, num_seeds=num_seeds, concat_hist=False)
@@ -209,16 +213,29 @@ def compute_stats_assembly():
             metrics = humanmac_metrics(
                 pred_candidates=pred_candidates,
                 gt_future=gt_cpu,
-                start_pose=start_pose.detach().cpu().to(dtype=torch.float32),
+                conditioning_context=conditioning_context.detach().cpu().to(dtype=torch.float32),
                 threshold=float(args.multimodal_threshold),
             )
-            for stats in ['APD', 'ADE', 'FDE', 'MMADE', 'MMFDE']:
-                stats_meter[stats][algo].update(metrics[stats])
+            humanmac_batches[algo]['pred'].append(pred_candidates.detach().cpu())
+            humanmac_batches[algo]['gt'].append(gt_cpu.detach().cpu())
+            humanmac_batches[algo]['context'].append(conditioning_context.detach().cpu().to(dtype=torch.float32))
 
         print('-' * 80)
         for stats in stats_names:
             str_stats = f'{num_samples:04d} {stats}: ' + ' '.join([f'{x}: {y.val:.4f}({y.avg:.4f})' for x, y in stats_meter[stats].items()])
             print(str_stats)
+
+    for algo in algos:
+        if not humanmac_batches[algo]['pred']:
+            continue
+        metrics = humanmac_metrics(
+            pred_candidates=torch.cat(humanmac_batches[algo]['pred'], dim=1),
+            gt_future=torch.cat(humanmac_batches[algo]['gt'], dim=0),
+            conditioning_context=torch.cat(humanmac_batches[algo]['context'], dim=0),
+            threshold=float(args.multimodal_threshold),
+        )
+        for stats in ['APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID']:
+            stats_meter[stats][algo].update(metrics[stats])
 
     logger.info('=' * 80)
     for stats in stats_names:
@@ -242,8 +259,8 @@ def get_multimodal_gt():
         data = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)
         all_data.append(data)
     all_data = np.concatenate(all_data, axis=0)
-    all_start_pose = all_data[:, t_his - 1, :]
-    pd = squareform(pdist(all_start_pose))
+    all_context = all_data[:, :t_his, :]
+    pd = squareform(pdist(all_context.reshape(all_context.shape[0], -1)))
     traj_gt_arr = []
     for i in range(pd.shape[0]):
         ind = np.nonzero(pd[i] < args.multimodal_threshold)

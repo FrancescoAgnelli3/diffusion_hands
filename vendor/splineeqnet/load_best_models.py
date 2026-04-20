@@ -45,8 +45,6 @@ def _write_results_csv(results_csv: str, rows: list[Dict[str, object]]) -> None:
         "action_filter",
         "checkpoint",
         "num_candidates",
-        "diffusion_best_of_k",
-        "humanmac_num_candidates",
         "humanmac_multimodal_threshold",
         "test_mpjpe_best",
         "test_mpjpe_norm_best",
@@ -84,11 +82,6 @@ def main() -> Dict[str, Dict[str, object]]:
     ap.add_argument("--seed", type=int, default=None, help="Override random seed for dataset/build pipeline.")
     ap.add_argument("--eval-batch-mult", type=int, default=1, help="Multiplier for evaluation batch size.")
     ap.add_argument("--save-eval-examples", action="store_true", help="When set, persist evaluation examples (merged_pred/merged_tgt tensors) during evaluation.")
-    ap.add_argument(
-        "--save-eval-examples-all-k",
-        action="store_true",
-        help="When set with twostage diffusion best-of-k evaluation, save all k predictions per collected evaluation example.",
-    )
     ap.add_argument(
         "--num-candidates",
         type=int,
@@ -159,8 +152,7 @@ def main() -> Dict[str, Dict[str, object]]:
             train_cfg.model = model_name
             train_cfg.epochs = 0
             train_cfg.twostage_diffusion_epochs = 0
-            train_cfg.save_eval_examples = bool(args.save_eval_examples or args.save_eval_examples_all_k)
-            train_cfg.save_eval_examples_all_k = bool(args.save_eval_examples_all_k)
+            train_cfg.save_eval_examples = bool(args.save_eval_examples)
 
             train_dataset, val_dataset, test_dataset = build_datasets(ds_cfg)
             train_loader, _, test_loader = make_loaders(
@@ -182,8 +174,6 @@ def main() -> Dict[str, Dict[str, object]]:
             collect_twostage_tries = (
                 model_name_clean == "twostage_dct_diffusion" and num_candidates > 1
             )
-            if args.save_eval_examples_all_k and num_candidates <= 1:
-                print("[Warning] --save-eval-examples-all-k requires --num-candidates > 1 to save k samples.")
             metrics = run_experiment(
                 ds=ds_cfg,
                 train_cfg=train_cfg,
@@ -194,11 +184,10 @@ def main() -> Dict[str, Dict[str, object]]:
                 log_wandb=False,
                 load_model_path=checkpoint_path,
                 twostage_eval_phase="diffusion",
-                twostage_eval_best_of_k=num_candidates,
+                num_candidates=num_candidates,
                 twostage_eval_collect_all=collect_twostage_tries,
                 twostage_eval_oracle_mpjpe=True,
                 compute_humanmac_metrics=True,
-                humanmac_num_candidates=num_candidates,
                 humanmac_multimodal_threshold=float(args.humanmac_multimodal_threshold),
             )
             if metrics is None:
@@ -220,8 +209,6 @@ def main() -> Dict[str, Dict[str, object]]:
                 "action_filter": ds_cfg.action_filter,
                 "checkpoint": checkpoint_path,
                 "num_candidates": num_candidates,
-                "diffusion_best_of_k": num_candidates,
-                "humanmac_num_candidates": num_candidates,
                 "humanmac_multimodal_threshold": float(args.humanmac_multimodal_threshold),
                 "test_mpjpe_best": test_mpjpe,
                 "test_mpjpe_norm_best": test_mpjpe_norm,

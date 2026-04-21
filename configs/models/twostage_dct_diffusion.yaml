@@ -29,6 +29,7 @@ defaults:
   twostage_beta_matrix_power: 1.0
   twostage_beta_matrix_min_rate: 0.5
   twostage_beta_matrix_max_rate: 2.0
+  twostage_node_covariance_type: laplacian_heat_kernel
   twostage_mobility_palm_var: 0.15
   twostage_mobility_depth1_var: 0.35
   twostage_mobility_depth2_var: 0.70
@@ -42,6 +43,7 @@ defaults:
   twostage_freeze_coarse: false
   twostage_diffusion_coarse_warmup_epochs: 25
   twostage_allow_no_conditioning: false
+  twostage_diffusion_only: false
   twostage_cond_use_history: false
   twostage_cond_use_coarse: true
   twostage_use_mamp_condition: false

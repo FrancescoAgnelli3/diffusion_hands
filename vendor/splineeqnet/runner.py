@@ -98,6 +98,8 @@ def run_experiment(
         tag += f"__twddim={int(train_cfg.twostage_ddim_steps)}"
     if train_cfg.twostage_coarse_target_lowpass_only is not None:
         tag += f"__twlpgt={int(train_cfg.twostage_coarse_target_lowpass_only)}"
+    if train_cfg.twostage_diffusion_only is not None:
+        tag += f"__twdiffonly={int(train_cfg.twostage_diffusion_only)}"
 
     config = {
         "batch_size": int(ds.batch_size),
@@ -195,6 +197,7 @@ def run_experiment(
         ("twostage_beta_matrix_power", train_cfg.twostage_beta_matrix_power, float),
         ("twostage_beta_matrix_min_rate", train_cfg.twostage_beta_matrix_min_rate, float),
         ("twostage_beta_matrix_max_rate", train_cfg.twostage_beta_matrix_max_rate, float),
+        ("twostage_node_covariance_type", train_cfg.twostage_node_covariance_type, str),
         ("twostage_mobility_palm_var", train_cfg.twostage_mobility_palm_var, float),
         ("twostage_mobility_depth1_var", train_cfg.twostage_mobility_depth1_var, float),
         ("twostage_mobility_depth2_var", train_cfg.twostage_mobility_depth2_var, float),
@@ -210,6 +213,7 @@ def run_experiment(
         ("twostage_cond_use_history", train_cfg.twostage_cond_use_history, bool),
         ("twostage_cond_use_coarse", train_cfg.twostage_cond_use_coarse, bool),
         ("twostage_allow_no_conditioning", train_cfg.twostage_allow_no_conditioning, bool),
+        ("twostage_diffusion_only", train_cfg.twostage_diffusion_only, bool),
         ("twostage_use_mamp_condition", train_cfg.twostage_use_mamp_condition, bool),
         ("twostage_use_mamp_condition_coarse", train_cfg.twostage_use_mamp_condition_coarse, bool),
         ("twostage_mamp_checkpoint", train_cfg.twostage_mamp_checkpoint, str),

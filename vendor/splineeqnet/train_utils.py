@@ -420,6 +420,7 @@ def train(
         beta_matrix_power = float(config.get("twostage_beta_matrix_power", 1.0))
         beta_matrix_min_rate = float(config.get("twostage_beta_matrix_min_rate", 0.5))
         beta_matrix_max_rate = float(config.get("twostage_beta_matrix_max_rate", 2.0))
+        node_covariance_type = str(config.get("twostage_node_covariance_type", "laplacian_heat_kernel"))
         mobility_palm_var = float(config.get("twostage_mobility_palm_var", 0.15))
         mobility_depth1_var = float(config.get("twostage_mobility_depth1_var", 0.35))
         mobility_depth2_var = float(config.get("twostage_mobility_depth2_var", 0.70))
@@ -442,6 +443,7 @@ def train(
         cond_use_coarse = bool(config.get("twostage_cond_use_coarse", True))
         allow_no_conditioning = bool(config.get("twostage_allow_no_conditioning", False))
         coarse_target_lowpass_only = bool(config.get("twostage_coarse_target_lowpass_only", False))
+        diffusion_only = bool(config.get("twostage_diffusion_only", False))
         graph_laplacian_tau = float(config.get("twostage_graph_laplacian_tau", 1.0))
         covariance_jitter = float(config.get("twostage_covariance_jitter", 1e-4))
         twostage_use_mamp_condition = bool(config.get("twostage_use_mamp_condition", False))
@@ -449,6 +451,11 @@ def train(
         twostage_use_any_mamp_condition = (
             twostage_use_mamp_condition or twostage_use_mamp_condition_coarse
         )
+        if diffusion_only:
+            cond_use_coarse = False
+            if not cond_use_history and not twostage_use_any_mamp_condition:
+                allow_no_conditioning = True
+            twostage_train_coarse_in_diffusion = False
         if not (
             cond_use_history
             or cond_use_coarse
@@ -512,6 +519,7 @@ def train(
             beta_matrix_power=beta_matrix_power,
             beta_matrix_min_rate=beta_matrix_min_rate,
             beta_matrix_max_rate=beta_matrix_max_rate,
+            node_covariance_type=node_covariance_type,
             mobility_palm_var=mobility_palm_var,
             mobility_depth1_var=mobility_depth1_var,
             mobility_depth2_var=mobility_depth2_var,
@@ -527,6 +535,7 @@ def train(
             cond_use_coarse=cond_use_coarse,
             allow_no_conditioning=allow_no_conditioning,
             coarse_target_lowpass_only=coarse_target_lowpass_only,
+            diffusion_only=diffusion_only,
             graph_laplacian_tau=graph_laplacian_tau,
             covariance_jitter=covariance_jitter,
             simlpe_use_norm=bool(config.get("simlpe_use_norm", True)),
@@ -791,7 +800,10 @@ def train(
                 elif source == "coarse":
                     if twostage_model is None:
                         raise RuntimeError("Two-stage model is not available while precomputing coarse MAMP features.")
-                    coarse_3d = twostage_model.coarse(in_3d)
+                    if diffusion_only:
+                        coarse_3d = twostage_model._zero_coarse_future(in_3d)
+                    else:
+                        coarse_3d = twostage_model.coarse(in_3d)
                     feat = _compute_mamp_feat(coarse_3d)
                 else:
                     raise ValueError(f"Unknown MAMP precompute source: {source}")
@@ -943,8 +955,11 @@ def train(
                     twostage_mamp_feat = None
                     coarse_future_for_condition = None
                     if model == "twostage_dct_diffusion" and twostage_phase != "coarse":
-                        # Cache coarse prediction once per eval batch and reuse for all sampled candidates.
-                        coarse_future_for_condition = twostage_model.coarse(in_3d)
+                        if diffusion_only:
+                            coarse_future_for_condition = twostage_model._zero_coarse_future(in_3d)
+                        else:
+                            # Cache coarse prediction once per eval batch and reuse for all sampled candidates.
+                            coarse_future_for_condition = twostage_model.coarse(in_3d)
                         twostage_mamp_hist_feat = None
                         twostage_mamp_coarse_feat = None
                         if twostage_use_mamp_condition:
@@ -1285,12 +1300,15 @@ def train(
                     coarse_grad_active = bool(
                         twostage_train_coarse_in_diffusion and twostage_coarse_diffusion_group_added
                     )
-                    # Cache coarse prediction once per train batch during diffusion phase.
-                    if coarse_grad_active:
-                        coarse_future_for_condition = twostage_model.coarse(in_3d)
+                    if diffusion_only:
+                        coarse_future_for_condition = twostage_model._zero_coarse_future(in_3d)
                     else:
-                        with torch.no_grad():
+                        # Cache coarse prediction once per train batch during diffusion phase.
+                        if coarse_grad_active:
                             coarse_future_for_condition = twostage_model.coarse(in_3d)
+                        else:
+                            with torch.no_grad():
+                                coarse_future_for_condition = twostage_model.coarse(in_3d)
                     if twostage_use_mamp_condition:
                         if cached_mamp_feat is not None:
                             twostage_mamp_hist_feat = cached_mamp_feat.to(device=device).float()

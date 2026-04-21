@@ -57,6 +57,7 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_beta_matrix_power": 1.0,
         "twostage_beta_matrix_min_rate": 0.5,
         "twostage_beta_matrix_max_rate": 2.0,
+        "twostage_node_covariance_type": "laplacian_heat_kernel",
         "twostage_mobility_palm_var": 0.15,
         "twostage_mobility_depth1_var": 0.35,
         "twostage_mobility_depth2_var": 0.70,
@@ -72,6 +73,7 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_cond_use_history": False,
         "twostage_cond_use_coarse": True,
         "twostage_allow_no_conditioning": False,
+        "twostage_diffusion_only": False,
         "twostage_use_mamp_condition": False,
         "twostage_use_mamp_condition_coarse": False,
         "twostage_mamp_checkpoint": "",
@@ -147,6 +149,7 @@ class TrainCfg:
     twostage_beta_matrix_power: Optional[float] = None
     twostage_beta_matrix_min_rate: Optional[float] = None
     twostage_beta_matrix_max_rate: Optional[float] = None
+    twostage_node_covariance_type: Optional[str] = None
     twostage_mobility_palm_var: Optional[float] = None
     twostage_mobility_depth1_var: Optional[float] = None
     twostage_mobility_depth2_var: Optional[float] = None
@@ -162,6 +165,7 @@ class TrainCfg:
     twostage_cond_use_history: Optional[bool] = None
     twostage_cond_use_coarse: Optional[bool] = None
     twostage_allow_no_conditioning: Optional[bool] = None
+    twostage_diffusion_only: Optional[bool] = None
     twostage_use_mamp_condition: Optional[bool] = None
     twostage_use_mamp_condition_coarse: Optional[bool] = None
     twostage_mamp_checkpoint: Optional[str] = None

@@ -209,6 +209,9 @@ def _build_train_cfg(
     cfg.twostage_beta_matrix_max_rate = _coerce_optional(
         best_cfg.get("twostage_beta_matrix_max_rate"), float
     )
+    cfg.twostage_node_covariance_type = _coerce_optional(
+        best_cfg.get("twostage_node_covariance_type"), str
+    )
     cfg.twostage_mobility_palm_var = _coerce_optional(best_cfg.get("twostage_mobility_palm_var"), float)
     cfg.twostage_mobility_depth1_var = _coerce_optional(best_cfg.get("twostage_mobility_depth1_var"), float)
     cfg.twostage_mobility_depth2_var = _coerce_optional(best_cfg.get("twostage_mobility_depth2_var"), float)
@@ -233,6 +236,9 @@ def _build_train_cfg(
     cfg.twostage_cond_use_coarse = _coerce_optional(best_cfg.get("twostage_cond_use_coarse"), bool)
     cfg.twostage_allow_no_conditioning = _coerce_optional(
         best_cfg.get("twostage_allow_no_conditioning"), bool
+    )
+    cfg.twostage_diffusion_only = _coerce_optional(
+        best_cfg.get("twostage_diffusion_only"), bool
     )
     cfg.twostage_use_mamp_condition = _coerce_optional(best_cfg.get("twostage_use_mamp_condition"), bool)
     cfg.twostage_use_mamp_condition_coarse = _coerce_optional(best_cfg.get("twostage_use_mamp_condition_coarse"), bool)

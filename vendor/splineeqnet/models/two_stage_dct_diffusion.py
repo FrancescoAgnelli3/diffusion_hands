@@ -120,11 +120,13 @@ class TwoStageDCTDiffusionConfig:
     cond_use_coarse: bool = True
     allow_no_conditioning: bool = False
     coarse_target_lowpass_only: bool = False
+    diffusion_only: bool = False
 
     # Sampling stabilizers
     x0_clip: float = 0  # clip x0_hat in normalized space (0 disables)
 
-    # Heat-kernel covariance knobs
+    # Structured covariance knobs
+    node_covariance_type: str = "laplacian_heat_kernel"
     mobility_palm_var: float = 0.15
     mobility_depth1_var: float = 0.35
     mobility_depth2_var: float = 0.70
@@ -562,6 +564,7 @@ class HandKinematicCovariance:
         num_nodes: int,
         wrist_index: int,
         edges: Iterable[Tuple[int, int]],
+        node_covariance_type: str,
         palm_var: float,
         depth1_var: float,
         depth2_var: float,
@@ -573,6 +576,7 @@ class HandKinematicCovariance:
         self.num_nodes = int(num_nodes)
         self.wrist_index = int(wrist_index)
         self.edges = [(int(i), int(j)) for i, j in edges]
+        self.node_covariance_type = str(node_covariance_type)
         self.palm_var = float(palm_var)
         self.depth1_var = float(depth1_var)
         self.depth2_var = float(depth2_var)
@@ -589,6 +593,11 @@ class HandKinematicCovariance:
             raise ValueError(f"laplacian_alpha must be non-negative, got {self.laplacian_alpha}")
         if self.laplacian_beta < 0.0:
             raise ValueError(f"laplacian_beta must be non-negative, got {self.laplacian_beta}")
+        if self.node_covariance_type not in {"laplacian_heat_kernel", "laplacian_only", "diagonal"}:
+            raise ValueError(
+                "node_covariance_type must be one of "
+                f"{{'laplacian_heat_kernel', 'laplacian_only', 'diagonal'}}, got {self.node_covariance_type!r}"
+            )
 
         self.free_indices = [i for i in range(self.num_nodes) if i != self.wrist_index]
         self.num_free_nodes = len(self.free_indices)
@@ -666,10 +675,15 @@ class HandKinematicCovariance:
         Nf = self.num_free_nodes
         if Nf <= 0:
             raise ValueError("No free joints available after removing wrist.")
-        Sigma_node_full = self._laplacian_heat_kernel_full()
-        Sigma_node = Sigma_node_full[self.free_indices][:, self.free_indices]
-        D_half = torch.diag(torch.sqrt(self._node_variances_free()))
-        Sigma_node = D_half @ Sigma_node @ D_half
+        node_variances = self._node_variances_free()
+        if self.node_covariance_type == "diagonal":
+            Sigma_node = torch.diag(node_variances)
+        else:
+            Sigma_node_full = self._laplacian_heat_kernel_full()
+            Sigma_node = Sigma_node_full[self.free_indices][:, self.free_indices]
+            if self.node_covariance_type == "laplacian_heat_kernel":
+                D_half = torch.diag(torch.sqrt(node_variances))
+                Sigma_node = D_half @ Sigma_node @ D_half
         return torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
 
 
@@ -703,6 +717,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
                 num_nodes=cfg.num_nodes,
                 wrist_index=self.wrist_index,
                 edges=self.edges,
+                node_covariance_type=cfg.node_covariance_type,
                 palm_var=cfg.mobility_palm_var,
                 depth1_var=cfg.mobility_depth1_var,
                 depth2_var=cfg.mobility_depth2_var,
@@ -931,6 +946,17 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
             for p in self.coarse.parameters():
                 p.requires_grad = False
 
+    def _zero_coarse_future(self, history: torch.Tensor) -> torch.Tensor:
+        _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
+        return torch.zeros(
+            history.size(0),
+            self.cfg.pred_length,
+            self.cfg.num_nodes,
+            3,
+            device=history.device,
+            dtype=history.dtype,
+        )
+
     def diffusion_loss(
         self,
         history: torch.Tensor,
@@ -942,7 +968,9 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
         _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
         _assert_shape(future_gt, (None, self.cfg.pred_length, self.cfg.num_nodes, 3), "future_gt")
 
-        if coarse_future is None:
+        if self.cfg.diffusion_only:
+            coarse_future = self._zero_coarse_future(history)
+        elif coarse_future is None:
             coarse_future = self.coarse(history)
         else:
             _assert_shape(
@@ -976,7 +1004,9 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
         return_score: bool = False,
     ) -> torch.Tensor:
         _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
-        if coarse_future is None:
+        if self.cfg.diffusion_only:
+            coarse_future = self._zero_coarse_future(history)
+        elif coarse_future is None:
             coarse_future = self.coarse(history)
         else:
             _assert_shape(
@@ -1007,5 +1037,7 @@ class TwoStageDCTDiffusionForecaster(nn.Module):
 
     def forward(self, history: torch.Tensor) -> torch.Tensor:
         if self.training:
+            if self.cfg.diffusion_only:
+                return self._zero_coarse_future(history)
             return self.coarse(history)
         return self.predict(history, deterministic=True, seed=0)

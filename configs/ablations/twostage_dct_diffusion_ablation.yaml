@@ -31,102 +31,127 @@ twostage_ablation_base: &twostage_ablation_base
     save_eval_examples: false
 
 models:
-  twostage_base:
-    <<: *twostage_ablation_base
-    notes: "baseline: exact configs/models/twostage_dct_diffusion.yaml"
+  # twostage_base:
+  #   <<: *twostage_ablation_base
+  #   notes: "baseline: exact configs/models/twostage_dct_diffusion.yaml"
 
-  # Conditioning ablations (baseline has coarse=true, history=false)
-  twostage_no_coarse_cond:
+  # # Conditioning ablations (baseline has coarse=true, history=false)
+  # twostage_no_coarse_cond:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: remove coarse prediction conditioning (history-only conditioning)"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_cond_use_history: true
+  #     twostage_cond_use_coarse: false
+
+  # twostage_hist_plus_coarse:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: add history conditioning alongside coarse conditioning"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_cond_use_history: true
+
+  # # Coarse-stage training ablations
+  # twostage_freeze_coarse:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: freeze coarse model during diffusion stage"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_freeze_coarse: true
+
+  # twostage_coarse_warmup_0:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: unfreeze coarse model immediately when diffusion stage starts"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_diffusion_coarse_warmup_epochs: 0
+
+  # twostage_lowpass_coarse_gt:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: supervise coarse stage with low-pass-only target"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_coarse_target_lowpass_only: true
+
+  # # Denoiser / diffusion noise ablations
+  # twostage_denoiser_dim_64:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: reduce twostage denoiser hidden dimension to 64"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_denoiser_dim: 64
+
+  # twostage_denoiser_heads_4:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: use 4 attention heads in the twostage denoiser"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_denoiser_heads: 4
+
+  # twostage_dropout_01:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: set twostage denoiser dropout to 0.1"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_dropout: 0.1
+
+  # twostage_isotropic_noise:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: replace hand-structured diffusion noise with isotropic noise"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_isotropic_noise: true
+
+  # twostage_diagonal_noise:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: replace Laplacian heat-kernel hand covariance with diagonal per-joint covariance"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_node_covariance_type: diagonal
+
+  # twostage_laplacian_only_noise:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: use Laplacian heat-kernel hand covariance without diagonal per-joint scaling"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_node_covariance_type: laplacian_only
+
+  twostage_diffusion_only:
     <<: *twostage_ablation_base
-    notes: "ablation: remove coarse prediction conditioning (history-only conditioning)"
+    notes: "ablation: remove the coarse model and run history-conditioned diffusion directly"
+    train:
+      epochs: 0
     defaults:
       save_eval_examples: false
+      twostage_diffusion_only: true
       twostage_cond_use_history: true
       twostage_cond_use_coarse: false
 
-  twostage_hist_plus_coarse:
-    <<: *twostage_ablation_base
-    notes: "ablation: add history conditioning alongside coarse conditioning"
-    defaults:
-      save_eval_examples: false
-      twostage_cond_use_history: true
+  # twostage_beta_power_0:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: disable spectral beta rate shaping"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_beta_matrix_power: 0.0
 
-  # Coarse-stage training ablations
-  twostage_freeze_coarse:
-    <<: *twostage_ablation_base
-    notes: "ablation: freeze coarse model during diffusion stage"
-    defaults:
-      save_eval_examples: false
-      twostage_freeze_coarse: true
+  # twostage_beta_power_15:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: increase spectral beta rate shaping power to 1.5"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_beta_matrix_power: 1.5
 
-  twostage_coarse_warmup_0:
-    <<: *twostage_ablation_base
-    notes: "ablation: unfreeze coarse model immediately when diffusion stage starts"
-    defaults:
-      save_eval_examples: false
-      twostage_diffusion_coarse_warmup_epochs: 0
+  # # DCT coarse budget ablations around baseline k_low=60
+  # twostage_klow_40:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: reduce low-frequency DCT budget from 60 to 40"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_k_low: 40
 
-  twostage_lowpass_coarse_gt:
-    <<: *twostage_ablation_base
-    notes: "ablation: supervise coarse stage with low-pass-only target"
-    defaults:
-      save_eval_examples: false
-      twostage_coarse_target_lowpass_only: true
-
-  # Denoiser / diffusion noise ablations
-  twostage_denoiser_dim_64:
-    <<: *twostage_ablation_base
-    notes: "ablation: reduce twostage denoiser hidden dimension to 64"
-    defaults:
-      save_eval_examples: false
-      twostage_denoiser_dim: 64
-
-  twostage_denoiser_heads_4:
-    <<: *twostage_ablation_base
-    notes: "ablation: use 4 attention heads in the twostage denoiser"
-    defaults:
-      save_eval_examples: false
-      twostage_denoiser_heads: 4
-
-  twostage_dropout_01:
-    <<: *twostage_ablation_base
-    notes: "ablation: set twostage denoiser dropout to 0.1"
-    defaults:
-      save_eval_examples: false
-      twostage_dropout: 0.1
-
-  twostage_isotropic_noise:
-    <<: *twostage_ablation_base
-    notes: "ablation: replace hand-structured diffusion noise with isotropic noise"
-    defaults:
-      save_eval_examples: false
-      twostage_isotropic_noise: true
-
-  twostage_beta_power_0:
-    <<: *twostage_ablation_base
-    notes: "ablation: disable spectral beta rate shaping"
-    defaults:
-      save_eval_examples: false
-      twostage_beta_matrix_power: 0.0
-
-  twostage_beta_power_15:
-    <<: *twostage_ablation_base
-    notes: "ablation: increase spectral beta rate shaping power to 1.5"
-    defaults:
-      save_eval_examples: false
-      twostage_beta_matrix_power: 1.5
-
-  # DCT coarse budget ablations around baseline k_low=60
-  twostage_klow_40:
-    <<: *twostage_ablation_base
-    notes: "ablation: reduce low-frequency DCT budget from 60 to 40"
-    defaults:
-      save_eval_examples: false
-      twostage_k_low: 40
-
-  twostage_klow_80:
-    <<: *twostage_ablation_base
-    notes: "ablation: increase low-frequency DCT budget from 60 to 80"
-    defaults:
-      save_eval_examples: false
-      twostage_k_low: 80
+  # twostage_klow_80:
+  #   <<: *twostage_ablation_base
+  #   notes: "ablation: increase low-frequency DCT budget from 60 to 80"
+  #   defaults:
+  #     save_eval_examples: false
+  #     twostage_k_low: 80

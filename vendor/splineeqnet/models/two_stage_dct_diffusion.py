@@ -134,6 +134,7 @@ class TwoStageDCTDiffusionConfig:
     graph_laplacian_tau: float = 1.0
     graph_laplacian_alpha: float = 0.0
     graph_laplacian_beta: float = 1.0
+    graph_laplacian_normalized: bool = True
     covariance_jitter: float = 1e-4
 
     @property
@@ -572,6 +573,7 @@ class HandKinematicCovariance:
         laplacian_tau: float,
         laplacian_alpha: float,
         laplacian_beta: float,
+        laplacian_normalized: bool,
     ) -> None:
         self.num_nodes = int(num_nodes)
         self.wrist_index = int(wrist_index)
@@ -584,6 +586,7 @@ class HandKinematicCovariance:
         self.laplacian_tau = float(laplacian_tau)
         self.laplacian_alpha = float(laplacian_alpha)
         self.laplacian_beta = float(laplacian_beta)
+        self.laplacian_normalized = bool(laplacian_normalized)
 
         if not (0 <= self.wrist_index < self.num_nodes):
             raise ValueError(f"Invalid wrist_index={self.wrist_index} for num_nodes={self.num_nodes}")
@@ -593,10 +596,22 @@ class HandKinematicCovariance:
             raise ValueError(f"laplacian_alpha must be non-negative, got {self.laplacian_alpha}")
         if self.laplacian_beta < 0.0:
             raise ValueError(f"laplacian_beta must be non-negative, got {self.laplacian_beta}")
-        if self.node_covariance_type not in {"laplacian_heat_kernel", "laplacian_only", "diagonal"}:
+        if self.node_covariance_type not in {
+            "laplacian_heat_kernel",
+            "gaussian_kernel",
+            "empirical_temporal_mean",
+            "empirical_heat_kernel",
+            "empirical_plus_theoretical",
+            "laplacian_only",
+            "diagonal",
+        }:
             raise ValueError(
                 "node_covariance_type must be one of "
-                f"{{'laplacian_heat_kernel', 'laplacian_only', 'diagonal'}}, got {self.node_covariance_type!r}"
+                f"{{'laplacian_heat_kernel', 'gaussian_kernel', 'empirical_temporal_mean', "
+                f"'empirical_heat_kernel', "
+                f"'empirical_plus_theoretical', "
+                f"'laplacian_only', 'diagonal'}}, "
+                f"got {self.node_covariance_type!r}"
             )
 
         self.free_indices = [i for i in range(self.num_nodes) if i != self.wrist_index]
@@ -656,14 +671,17 @@ class HandKinematicCovariance:
     def _graph_laplacian_full(self) -> torch.Tensor:
         A1 = self._adjacency_matrix_full()
         deg = A1.sum(dim=1)
-        inv_sqrt_deg = torch.zeros_like(deg)
-        mask = deg > 0
-        inv_sqrt_deg[mask] = deg[mask].rsqrt()
-        D_inv_sqrt = torch.diag(inv_sqrt_deg)
+        D = torch.diag(deg)
         eye = torch.eye(self.num_nodes, dtype=torch.float32)
-        normalized_adjacency = D_inv_sqrt @ A1 @ D_inv_sqrt
-        normalized_laplacian = eye - normalized_adjacency
-        return self.laplacian_alpha * eye + self.laplacian_beta * normalized_laplacian
+        if self.laplacian_normalized:
+            inv_sqrt_deg = torch.zeros_like(deg)
+            mask = deg > 0
+            inv_sqrt_deg[mask] = deg[mask].rsqrt()
+            D_inv_sqrt = torch.diag(inv_sqrt_deg)
+            laplacian = eye - (D_inv_sqrt @ A1 @ D_inv_sqrt)
+        else:
+            laplacian = D - A1
+        return self.laplacian_alpha * eye + self.laplacian_beta * laplacian
 
     def _laplacian_heat_kernel_full(self) -> torch.Tensor:
         lap = self._graph_laplacian_full()
@@ -671,20 +689,78 @@ class HandKinematicCovariance:
         heat_eigvals = torch.exp(-self.laplacian_tau * eigvals)
         return eigvecs @ torch.diag(heat_eigvals) @ eigvecs.t()
 
-    def build_feature_covariance(self) -> torch.Tensor:
+    def _gaussian_kernel_full(self) -> torch.Tensor:
+        lap = self._graph_laplacian_full()
+        eigvals, eigvecs = torch.linalg.eigh(lap)
+        gaussian_eigvals = torch.exp(-0.5 * (self.laplacian_tau ** 2) * (eigvals ** 2))
+        return eigvecs @ torch.diag(gaussian_eigvals) @ eigvecs.t()
+
+    def _feature_scale_half(self) -> torch.Tensor:
+        node_variances = self._node_variances_free()
+        feature_variances = node_variances.repeat_interleave(3)
+        return torch.diag(torch.sqrt(feature_variances))
+
+    def _empirical_feature_covariance_scaled(self, empirical_feature_covariance: torch.Tensor) -> torch.Tensor:
+        feat_dim = 3 * self.num_free_nodes
+        if empirical_feature_covariance.shape != (feat_dim, feat_dim):
+            raise ValueError(
+                "empirical_feature_covariance must have shape "
+                f"({feat_dim}, {feat_dim}), got {tuple(empirical_feature_covariance.shape)}"
+            )
+        D_half = self._feature_scale_half().to(empirical_feature_covariance.dtype)
+        return D_half @ empirical_feature_covariance @ D_half
+
+    def _empirical_feature_covariance_unscaled(self, empirical_feature_covariance: torch.Tensor) -> torch.Tensor:
+        feat_dim = 3 * self.num_free_nodes
+        if empirical_feature_covariance.shape != (feat_dim, feat_dim):
+            raise ValueError(
+                "empirical_feature_covariance must have shape "
+                f"({feat_dim}, {feat_dim}), got {tuple(empirical_feature_covariance.shape)}"
+            )
+        return empirical_feature_covariance
+
+    def _empirical_heat_kernel_covariance(self, empirical_feature_covariance: torch.Tensor) -> torch.Tensor:
+        empirical_covariance = self._empirical_feature_covariance_unscaled(empirical_feature_covariance)
+        eigvals, eigvecs = torch.linalg.eigh(empirical_covariance)
+        heat_eigvals = torch.exp(-self.laplacian_tau * eigvals)
+        heat_kernel = eigvecs @ torch.diag(heat_eigvals) @ eigvecs.t()
+        D_half = self._feature_scale_half().to(heat_kernel.dtype)
+        return D_half @ heat_kernel @ D_half
+
+    def build_feature_covariance(self, empirical_feature_covariance: Optional[torch.Tensor] = None) -> torch.Tensor:
         Nf = self.num_free_nodes
         if Nf <= 0:
             raise ValueError("No free joints available after removing wrist.")
+        if self.node_covariance_type == "empirical_temporal_mean":
+            if empirical_feature_covariance is None:
+                raise ValueError("empirical_feature_covariance is required for empirical_temporal_mean covariance.")
+            return self._empirical_feature_covariance_scaled(empirical_feature_covariance)
+        if self.node_covariance_type == "empirical_heat_kernel":
+            if empirical_feature_covariance is None:
+                raise ValueError("empirical_feature_covariance is required for empirical_heat_kernel covariance.")
+            return self._empirical_heat_kernel_covariance(empirical_feature_covariance)
+
         node_variances = self._node_variances_free()
         if self.node_covariance_type == "diagonal":
             Sigma_node = torch.diag(node_variances)
         else:
-            Sigma_node_full = self._laplacian_heat_kernel_full()
+            if self.node_covariance_type == "gaussian_kernel":
+                Sigma_node_full = self._gaussian_kernel_full()
+            else:
+                Sigma_node_full = self._laplacian_heat_kernel_full()
             Sigma_node = Sigma_node_full[self.free_indices][:, self.free_indices]
-            if self.node_covariance_type == "laplacian_heat_kernel":
+            if self.node_covariance_type in {"laplacian_heat_kernel", "gaussian_kernel"}:
                 D_half = torch.diag(torch.sqrt(node_variances))
                 Sigma_node = D_half @ Sigma_node @ D_half
-        return torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
+        theoretical_covariance = torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
+        if self.node_covariance_type == "empirical_plus_theoretical":
+            if empirical_feature_covariance is None:
+                raise ValueError(
+                    "empirical_feature_covariance is required for empirical_plus_theoretical covariance."
+                )
+            empirical_covariance = self._empirical_feature_covariance_scaled(empirical_feature_covariance)
+            return theoretical_covariance + empirical_covariance
+        return theoretical_covariance
 
 
 # ----------------------------- Diffusion module -------------------------------
@@ -701,6 +777,9 @@ class TimeResidualConditionalDiffusion(nn.Module):
         self.wrist_index = int(metadata["wrist_index"])
         edges_raw = metadata.get("edges", ())
         self.edges = [(int(i), int(j)) for i, j in edges_raw] if edges_raw else []
+        empirical_feature_covariance = metadata.get("empirical_feature_covariance")
+        if empirical_feature_covariance is not None:
+            empirical_feature_covariance = torch.as_tensor(empirical_feature_covariance, dtype=torch.float32)
 
         if not (0 <= self.wrist_index < cfg.num_nodes):
             raise ValueError(f"Invalid wrist_index={self.wrist_index} for num_nodes={cfg.num_nodes}")
@@ -725,8 +804,9 @@ class TimeResidualConditionalDiffusion(nn.Module):
                 laplacian_tau=cfg.graph_laplacian_tau,
                 laplacian_alpha=cfg.graph_laplacian_alpha,
                 laplacian_beta=cfg.graph_laplacian_beta,
+                laplacian_normalized=cfg.graph_laplacian_normalized,
             )
-            cov = cov_builder.build_feature_covariance()
+            cov = cov_builder.build_feature_covariance(empirical_feature_covariance=empirical_feature_covariance)
         else:
             cov = torch.eye(self.free_feature_dim, dtype=torch.float32)
 

@@ -69,8 +69,6 @@ ASSEMBLY_HAND_GROUPS: Tuple[dict, ...] = (
     },
 )
 
-H2O_HAND_GROUPS: Tuple[dict, ...] = ASSEMBLY_HAND_GROUPS
-
 BIGHAND_HAND_GROUPS: Tuple[dict, ...] = (
     {
         "wrist_index": 0,
@@ -132,6 +130,8 @@ FPHA_HAND_GROUPS: Tuple[dict, ...] = (
         ),
     },
 )
+
+H2O_HAND_GROUPS: Tuple[dict, ...] = FPHA_HAND_GROUPS
 
 
 DATASET_GRAPH_METADATA: Dict[str, Dict[str, object]] = {

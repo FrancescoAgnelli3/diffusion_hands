@@ -224,6 +224,9 @@ def _build_train_cfg(
     cfg.twostage_graph_laplacian_beta = _coerce_optional(
         best_cfg.get("twostage_graph_laplacian_beta"), float
     )
+    cfg.twostage_graph_laplacian_normalized = _coerce_optional(
+        best_cfg.get("twostage_graph_laplacian_normalized"), bool
+    )
     cfg.twostage_denoiser_dim = _coerce_optional(best_cfg.get("twostage_denoiser_dim"), int)
     cfg.twostage_denoiser_depth = _coerce_optional(best_cfg.get("twostage_denoiser_depth"), int)
     cfg.twostage_denoiser_heads = _coerce_optional(best_cfg.get("twostage_denoiser_heads"), int)

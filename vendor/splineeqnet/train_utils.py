@@ -93,6 +93,46 @@ def _print_model_parameters(model_or_modules, title: str = "Model") -> int:
     print(f"{title} parameters: {total} ({pretty})")
     return total
 
+
+def _estimate_empirical_temporal_mean_covariance(
+    loader: DataLoader,
+    *,
+    wrist_index: int,
+    node_num: int,
+) -> torch.Tensor:
+    free_indices = [i for i in range(int(node_num)) if i != int(wrist_index)]
+    if not free_indices:
+        return torch.zeros((0, 0), dtype=torch.float32)
+
+    batch_means: List[torch.Tensor] = []
+    for batch in loader:
+        if not isinstance(batch, (list, tuple)) or len(batch) < 2:
+            raise ValueError("Loader batch must provide input and target tensors.")
+        out = batch[1]
+        if out.ndim != 4 or out.size(-1) < 7:
+            raise ValueError(
+                "Expected target tensor with shape (B, T, N, C>=7) so target 3D coordinates can be read from out[..., 4:]."
+            )
+        tgt_3d = out[:, :, :, 4:].to(dtype=torch.float64, device="cpu")
+        if tgt_3d.shape[2] != node_num or tgt_3d.shape[3] != 3:
+            raise ValueError(
+                f"Expected target 3D tensor shape (B, T, {node_num}, 3), got {tuple(tgt_3d.shape)}"
+            )
+        pose_mean = tgt_3d.mean(dim=1)
+        pose_free = pose_mean[:, free_indices, :].reshape(pose_mean.size(0), -1)
+        batch_means.append(pose_free)
+
+    if not batch_means:
+        raise ValueError("Cannot estimate empirical covariance from an empty training loader.")
+
+    samples = torch.cat(batch_means, dim=0)
+    if samples.size(0) < 2:
+        raise ValueError("At least two training samples are required to estimate empirical covariance.")
+
+    centered = samples - samples.mean(dim=0, keepdim=True)
+    cov = centered.t().matmul(centered) / float(samples.size(0) - 1)
+    return cov.to(dtype=torch.float32)
+
 def train(
     config: dict,
     epochs: Optional[int] = None,
@@ -427,6 +467,7 @@ def train(
         mobility_depth3plus_var = float(config.get("twostage_mobility_depth3plus_var", 1.00))
         graph_laplacian_alpha = float(config.get("twostage_graph_laplacian_alpha", 0.0))
         graph_laplacian_beta = float(config.get("twostage_graph_laplacian_beta", 1.0))
+        graph_laplacian_normalized = bool(config.get("twostage_graph_laplacian_normalized", True))
         d_model = int(config.get("twostage_denoiser_dim", 256))
         depth = int(config.get("twostage_denoiser_depth", 6))
         n_heads = int(config.get("twostage_denoiser_heads", 8))
@@ -506,6 +547,18 @@ def train(
                 "or enable twostage_isotropic_noise."
             )
 
+        empirical_feature_covariance = None
+        if node_covariance_type in {
+            "empirical_temporal_mean",
+            "empirical_heat_kernel",
+            "empirical_plus_theoretical",
+        }:
+            empirical_feature_covariance = _estimate_empirical_temporal_mean_covariance(
+                loader,
+                wrist_index=int(twostage_wrist_index),
+                node_num=node_num,
+            )
+
         tw_cfg = TwoStageDCTDiffusionConfig(
             input_length=input_n,
             pred_length=output_n,
@@ -526,6 +579,7 @@ def train(
             mobility_depth3plus_var=mobility_depth3plus_var,
             graph_laplacian_alpha=graph_laplacian_alpha,
             graph_laplacian_beta=graph_laplacian_beta,
+            graph_laplacian_normalized=graph_laplacian_normalized,
             denoiser_dim=d_model,
             denoiser_depth=depth,
             denoiser_heads=n_heads,
@@ -549,6 +603,7 @@ def train(
             metadata={
                 "wrist_index": int(twostage_wrist_index),
                 "edges": tuple((int(i), int(j)) for i, j in twostage_links),
+                "empirical_feature_covariance": empirical_feature_covariance,
             },
         ).to(device)
         if twostage_use_any_mamp_condition:

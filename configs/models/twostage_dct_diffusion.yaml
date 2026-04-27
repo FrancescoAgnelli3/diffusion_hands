@@ -36,7 +36,7 @@ defaults:
   twostage_mobility_depth3plus_var: 1.00
   twostage_graph_laplacian_alpha: 0.0
   twostage_graph_laplacian_beta: 1.0
-  twostage_denoiser_dim: 128
+  twostage_denoiser_dim: 256
   twostage_denoiser_depth: 6
   twostage_denoiser_heads: 4
   twostage_dropout: 0.0

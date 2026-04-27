@@ -204,6 +204,7 @@ def run_experiment(
         ("twostage_mobility_depth3plus_var", train_cfg.twostage_mobility_depth3plus_var, float),
         ("twostage_graph_laplacian_alpha", train_cfg.twostage_graph_laplacian_alpha, float),
         ("twostage_graph_laplacian_beta", train_cfg.twostage_graph_laplacian_beta, float),
+        ("twostage_graph_laplacian_normalized", train_cfg.twostage_graph_laplacian_normalized, bool),
         ("twostage_denoiser_dim", train_cfg.twostage_denoiser_dim, int),
         ("twostage_denoiser_depth", train_cfg.twostage_denoiser_depth, int),
         ("twostage_denoiser_heads", train_cfg.twostage_denoiser_heads, int),

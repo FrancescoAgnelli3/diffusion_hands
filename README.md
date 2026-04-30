@@ -50,6 +50,24 @@ Twostage ablations:
 bash scripts/run_twostage_ablation.sh
 ```
 
+Multi-seed sweep with the default experiment config:
+
+```bash
+bash scripts/run_all_models_multiseed.sh -n 5
+```
+
+This writes a dedicated raw CSV with a `seed` column under `results/`, plus a
+companion summary CSV containing per-model mean/std aggregated across seeds.
+
+Multi-seed sweep for the twostage ablations:
+
+```bash
+bash scripts/run_twostage_ablation_multiseed.sh -n 5
+```
+
+This does the same for `configs/ablations/twostage_dct_diffusion_ablation.yaml`
+and writes ablation-specific raw and summary CSVs under `results/`.
+
 ## Experiment Config
 
 `configs/experiment.yaml` controls:

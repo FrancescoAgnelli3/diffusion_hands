@@ -1,5 +1,5 @@
 seed: 0
-gpu_index: 0
+gpu_index: 1
 num_candidates: 10
 humanmac_multimodal_threshold: 7.0
 
@@ -29,7 +29,7 @@ models:
   belfusion:
     enabled: false
   comusion:
-    enabled: false
+    enabled: true
   dlow_cvae:
     enabled: false
   humanmac:

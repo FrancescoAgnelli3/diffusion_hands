@@ -13,7 +13,7 @@ train:
       monitor: train_loss
   diffusion:
     model: skeleton_diffusion
-    epochs: 100
+    epochs: 50
     iter_per_epoch: null
     early_stopping:
       enabled: true

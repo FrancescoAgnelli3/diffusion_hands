@@ -316,6 +316,53 @@ With the current default configuration, the diffusion loss is the mean squared e
 \]
 The Mahalanobis-weighted variant is available as an alternative configuration.
 
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+All experiments are executed through the unified runner described in
+\texttt{configs/experiment.yaml}, which applies the same preprocessing
+pipeline to every model. The observed context length is $70$ frames, the
+forecast horizon is $30$ frames, and sliding windows are extracted with
+stride $5$. The default global seed is $0$, and multimodal evaluation keeps
+up to $10$ predicted candidates per input sequence.
+
+The current experiment configuration evaluates on four hand-motion datasets:
+\texttt{assembly}, \texttt{fpha}, \texttt{bighands}, and \texttt{h2o}. For
+the \texttt{assembly} dataset, evaluation is additionally broken down by the
+action filters
+\[
+\texttt{remove},\ \texttt{rotate},\ \texttt{unscrew},\ \texttt{attempt},\ \texttt{pick},\ \texttt{put}.
+\]
+For the other datasets, the action filter is disabled and the full test split
+is used. This setup ensures that all compared methods operate on the same
+input-output window definition and dataset partitioning protocol.
+
+\subsection{Baselines}
+
+The repository includes several competitor models that are trained and
+evaluated under the same orchestration framework as the proposed two-stage DCT
+diffusion model. The baselines configured in
+\texttt{configs/models/*.yaml} are:
+\begin{enumerate}
+\item \textbf{BeLFusion}, a latent conditional generative baseline with a
+feedforward decoder;
+\item \textbf{CoMusion}, a diffusion-based motion predictor with graph and
+transformer components;
+\item \textbf{DLow-CVAE}, a conditional variational baseline for diverse
+future motion prediction;
+\item \textbf{HumanMAC}, a transformer-based denoising diffusion baseline;
+\item \textbf{SkeletonDiffusion}, a diffusion model built on top of a learned
+skeleton motion autoencoder;
+\item \textbf{GSPS}, a probabilistic sequence prediction baseline based on
+structured latent modeling.
+\end{enumerate}
+
+Although only the proposed model is enabled in the current default experiment
+file, these competitor implementations are available in the codebase and can
+be activated through the per-model \texttt{enabled} flags for direct
+comparison under matched preprocessing and evaluation settings.
+
 \section{Inference}
 
 At inference time, the coarse forecast $\hat{Y}^{c}$ is produced first. The diffusion model then samples a residual over the non-wrist joints using deterministic DDIM with $25$ reverse steps. The initial sample is drawn from the same structured Gaussian prior:

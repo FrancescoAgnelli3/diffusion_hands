@@ -78,6 +78,12 @@ def _make_ddim_timesteps(T: int, steps: int, device: torch.device) -> torch.Tens
     return idx
 
 
+def _clamp_optional(x: torch.Tensor, min_value: Optional[float], max_value: Optional[float]) -> torch.Tensor:
+    if min_value is None and max_value is None:
+        return x
+    return torch.clamp(x, min=min_value, max=max_value)
+
+
 # ----------------------------- Configs ----------------------------------------
 
 @dataclass
@@ -104,8 +110,8 @@ class TwoStageDCTDiffusionConfig:
     beta_schedule: str = "cosine"  # "cosine" or "linear"
     isotropic_noise: bool = False
     beta_matrix_power: float = 1.0
-    beta_matrix_min_rate: float = 0.5
-    beta_matrix_max_rate: float = 2.0
+    beta_matrix_min_rate: Optional[float] = 0.5
+    beta_matrix_max_rate: Optional[float] = 2.0
 
     # Denoiser architecture
     denoiser_dim: int = 256
@@ -131,6 +137,8 @@ class TwoStageDCTDiffusionConfig:
     mobility_depth1_var: float = 0.35
     mobility_depth2_var: float = 0.70
     mobility_depth3plus_var: float = 1.00
+    dhalf_gamma: float = 1.0
+    learnable_dhalf: bool = False
     graph_laplacian_tau: float = 1.0
     graph_laplacian_alpha: float = 0.0
     graph_laplacian_beta: float = 1.0
@@ -570,6 +578,7 @@ class HandKinematicCovariance:
         depth1_var: float,
         depth2_var: float,
         depth3plus_var: float,
+        dhalf_gamma: float,
         laplacian_tau: float,
         laplacian_alpha: float,
         laplacian_beta: float,
@@ -583,6 +592,7 @@ class HandKinematicCovariance:
         self.depth1_var = float(depth1_var)
         self.depth2_var = float(depth2_var)
         self.depth3plus_var = float(depth3plus_var)
+        self.dhalf_gamma = float(dhalf_gamma)
         self.laplacian_tau = float(laplacian_tau)
         self.laplacian_alpha = float(laplacian_alpha)
         self.laplacian_beta = float(laplacian_beta)
@@ -596,6 +606,8 @@ class HandKinematicCovariance:
             raise ValueError(f"laplacian_alpha must be non-negative, got {self.laplacian_alpha}")
         if self.laplacian_beta < 0.0:
             raise ValueError(f"laplacian_beta must be non-negative, got {self.laplacian_beta}")
+        if self.dhalf_gamma < 0.0:
+            raise ValueError(f"dhalf_gamma must be non-negative, got {self.dhalf_gamma}")
         if self.node_covariance_type not in {
             "laplacian_heat_kernel",
             "gaussian_kernel",
@@ -628,8 +640,8 @@ class HandKinematicCovariance:
                 adj[j].append(i)
         return adj
 
-    def _adjacency_matrix_full(self) -> torch.Tensor:
-        A1 = torch.zeros(self.num_nodes, self.num_nodes, dtype=torch.float32)
+    def _adjacency_matrix_full(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        A1 = torch.zeros(self.num_nodes, self.num_nodes, dtype=torch.float32, device=device)
         full_adj = self._make_adjacency_full()
         for i_orig in range(self.num_nodes):
             for j_orig in full_adj[i_orig]:
@@ -653,26 +665,46 @@ class HandKinematicCovariance:
             raise ValueError("Hand graph is disconnected from the wrist.")
         return dist
 
-    def _node_variances_free(self) -> torch.Tensor:
+    def _node_variances_free(
+        self,
+        bucket_variances: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
         dist = self._dist_from_wrist()
-        vars_free: List[float] = []
+        if bucket_variances is None:
+            bucket_values = torch.tensor(
+                [
+                    self.palm_var,
+                    self.depth1_var,
+                    self.depth2_var,
+                    self.depth3plus_var,
+                ],
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            if bucket_variances.shape != (4,):
+                raise ValueError(f"bucket_variances must have shape (4,), got {tuple(bucket_variances.shape)}")
+            bucket_values = bucket_variances.to(device=device, dtype=torch.float32)
+        bucket_indices: List[int] = []
         for orig_idx in self.free_indices:
             d = dist[orig_idx]
             if d <= 1:
-                vars_free.append(self.palm_var)
+                bucket_indices.append(0)
             elif d == 2:
-                vars_free.append(self.depth1_var)
+                bucket_indices.append(1)
             elif d == 3:
-                vars_free.append(self.depth2_var)
+                bucket_indices.append(2)
             else:
-                vars_free.append(self.depth3plus_var)
-        return torch.tensor(vars_free, dtype=torch.float32)
+                bucket_indices.append(3)
+        index_tensor = torch.tensor(bucket_indices, dtype=torch.long, device=bucket_values.device)
+        return bucket_values.index_select(0, index_tensor)
 
-    def _graph_laplacian_full(self) -> torch.Tensor:
-        A1 = self._adjacency_matrix_full()
+    def _graph_laplacian_full(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        A1 = self._adjacency_matrix_full(device=device)
         deg = A1.sum(dim=1)
         D = torch.diag(deg)
-        eye = torch.eye(self.num_nodes, dtype=torch.float32)
+        eye = torch.eye(self.num_nodes, dtype=torch.float32, device=A1.device)
         if self.laplacian_normalized:
             inv_sqrt_deg = torch.zeros_like(deg)
             mask = deg > 0
@@ -683,31 +715,43 @@ class HandKinematicCovariance:
             laplacian = D - A1
         return self.laplacian_alpha * eye + self.laplacian_beta * laplacian
 
-    def _laplacian_heat_kernel_full(self) -> torch.Tensor:
-        lap = self._graph_laplacian_full()
+    def _laplacian_heat_kernel_full(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        lap = self._graph_laplacian_full(device=device)
         eigvals, eigvecs = torch.linalg.eigh(lap)
         heat_eigvals = torch.exp(-self.laplacian_tau * eigvals)
         return eigvecs @ torch.diag(heat_eigvals) @ eigvecs.t()
 
-    def _gaussian_kernel_full(self) -> torch.Tensor:
-        lap = self._graph_laplacian_full()
+    def _gaussian_kernel_full(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        lap = self._graph_laplacian_full(device=device)
         eigvals, eigvecs = torch.linalg.eigh(lap)
         gaussian_eigvals = torch.exp(-0.5 * (self.laplacian_tau ** 2) * (eigvals ** 2))
         return eigvecs @ torch.diag(gaussian_eigvals) @ eigvecs.t()
 
-    def _feature_scale_half(self) -> torch.Tensor:
-        node_variances = self._node_variances_free()
+    def _feature_scale_half(
+        self,
+        node_variances: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
+        if node_variances is None:
+            node_variances = self._node_variances_free(device=device)
         feature_variances = node_variances.repeat_interleave(3)
-        return torch.diag(torch.sqrt(feature_variances))
+        return torch.diag(torch.pow(feature_variances, 0.5 * self.dhalf_gamma))
 
-    def _empirical_feature_covariance_scaled(self, empirical_feature_covariance: torch.Tensor) -> torch.Tensor:
+    def _empirical_feature_covariance_scaled(
+        self,
+        empirical_feature_covariance: torch.Tensor,
+        node_variances: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         feat_dim = 3 * self.num_free_nodes
         if empirical_feature_covariance.shape != (feat_dim, feat_dim):
             raise ValueError(
                 "empirical_feature_covariance must have shape "
                 f"({feat_dim}, {feat_dim}), got {tuple(empirical_feature_covariance.shape)}"
             )
-        D_half = self._feature_scale_half().to(empirical_feature_covariance.dtype)
+        D_half = self._feature_scale_half(
+            node_variances=node_variances,
+            device=empirical_feature_covariance.device,
+        ).to(empirical_feature_covariance.dtype)
         return D_half @ empirical_feature_covariance @ D_half
 
     def _empirical_feature_covariance_unscaled(self, empirical_feature_covariance: torch.Tensor) -> torch.Tensor:
@@ -719,46 +763,74 @@ class HandKinematicCovariance:
             )
         return empirical_feature_covariance
 
-    def _empirical_heat_kernel_covariance(self, empirical_feature_covariance: torch.Tensor) -> torch.Tensor:
+    def _empirical_heat_kernel_covariance(
+        self,
+        empirical_feature_covariance: torch.Tensor,
+        node_variances: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         empirical_covariance = self._empirical_feature_covariance_unscaled(empirical_feature_covariance)
         eigvals, eigvecs = torch.linalg.eigh(empirical_covariance)
         heat_eigvals = torch.exp(-self.laplacian_tau * eigvals)
         heat_kernel = eigvecs @ torch.diag(heat_eigvals) @ eigvecs.t()
-        D_half = self._feature_scale_half().to(heat_kernel.dtype)
+        D_half = self._feature_scale_half(
+            node_variances=node_variances,
+            device=heat_kernel.device,
+        ).to(heat_kernel.dtype)
         return D_half @ heat_kernel @ D_half
 
-    def build_feature_covariance(self, empirical_feature_covariance: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def build_feature_covariance(
+        self,
+        empirical_feature_covariance: Optional[torch.Tensor] = None,
+        bucket_variances: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         Nf = self.num_free_nodes
         if Nf <= 0:
             raise ValueError("No free joints available after removing wrist.")
+        target_device = None
+        if bucket_variances is not None:
+            target_device = bucket_variances.device
+        elif empirical_feature_covariance is not None:
+            target_device = empirical_feature_covariance.device
+        node_variances = self._node_variances_free(bucket_variances=bucket_variances, device=target_device)
         if self.node_covariance_type == "empirical_temporal_mean":
             if empirical_feature_covariance is None:
                 raise ValueError("empirical_feature_covariance is required for empirical_temporal_mean covariance.")
-            return self._empirical_feature_covariance_scaled(empirical_feature_covariance)
+            return self._empirical_feature_covariance_scaled(
+                empirical_feature_covariance,
+                node_variances=node_variances,
+            )
         if self.node_covariance_type == "empirical_heat_kernel":
             if empirical_feature_covariance is None:
                 raise ValueError("empirical_feature_covariance is required for empirical_heat_kernel covariance.")
-            return self._empirical_heat_kernel_covariance(empirical_feature_covariance)
+            return self._empirical_heat_kernel_covariance(
+                empirical_feature_covariance,
+                node_variances=node_variances,
+            )
 
-        node_variances = self._node_variances_free()
         if self.node_covariance_type == "diagonal":
-            Sigma_node = torch.diag(node_variances)
+            Sigma_node = torch.diag(torch.pow(node_variances, self.dhalf_gamma))
         else:
             if self.node_covariance_type == "gaussian_kernel":
-                Sigma_node_full = self._gaussian_kernel_full()
+                Sigma_node_full = self._gaussian_kernel_full(device=node_variances.device)
             else:
-                Sigma_node_full = self._laplacian_heat_kernel_full()
+                Sigma_node_full = self._laplacian_heat_kernel_full(device=node_variances.device)
             Sigma_node = Sigma_node_full[self.free_indices][:, self.free_indices]
             if self.node_covariance_type in {"laplacian_heat_kernel", "gaussian_kernel"}:
-                D_half = torch.diag(torch.sqrt(node_variances))
+                D_half = torch.diag(torch.pow(node_variances, 0.5 * self.dhalf_gamma))
                 Sigma_node = D_half @ Sigma_node @ D_half
-        theoretical_covariance = torch.kron(Sigma_node, torch.eye(3, dtype=torch.float32))
+        theoretical_covariance = torch.kron(
+            Sigma_node,
+            torch.eye(3, dtype=torch.float32, device=Sigma_node.device),
+        )
         if self.node_covariance_type == "empirical_plus_theoretical":
             if empirical_feature_covariance is None:
                 raise ValueError(
                     "empirical_feature_covariance is required for empirical_plus_theoretical covariance."
                 )
-            empirical_covariance = self._empirical_feature_covariance_scaled(empirical_feature_covariance)
+            empirical_covariance = self._empirical_feature_covariance_scaled(
+                empirical_feature_covariance,
+                node_variances=node_variances,
+            )
             return theoretical_covariance + empirical_covariance
         return theoretical_covariance
 
@@ -786,6 +858,8 @@ class TimeResidualConditionalDiffusion(nn.Module):
         self.free_indices = [i for i in range(cfg.num_nodes) if i != self.wrist_index]
         self.num_free_nodes = len(self.free_indices)
         self.free_feature_dim = 3 * self.num_free_nodes
+        self.learnable_dhalf = bool(cfg.learnable_dhalf)
+        self.cov_builder: Optional[HandKinematicCovariance] = None
 
         if cfg.isotropic_noise or self.num_free_nodes <= 0:
             cov = torch.eye(max(self.free_feature_dim, 1), dtype=torch.float32)
@@ -801,23 +875,41 @@ class TimeResidualConditionalDiffusion(nn.Module):
                 depth1_var=cfg.mobility_depth1_var,
                 depth2_var=cfg.mobility_depth2_var,
                 depth3plus_var=cfg.mobility_depth3plus_var,
+                dhalf_gamma=cfg.dhalf_gamma,
                 laplacian_tau=cfg.graph_laplacian_tau,
                 laplacian_alpha=cfg.graph_laplacian_alpha,
                 laplacian_beta=cfg.graph_laplacian_beta,
                 laplacian_normalized=cfg.graph_laplacian_normalized,
             )
+            self.cov_builder = cov_builder
             cov = cov_builder.build_feature_covariance(empirical_feature_covariance=empirical_feature_covariance)
         else:
             cov = torch.eye(self.free_feature_dim, dtype=torch.float32)
+        self._empirical_feature_covariance = empirical_feature_covariance
+
+        if self.learnable_dhalf:
+            bucket_init = torch.tensor(
+                [
+                    cfg.mobility_palm_var,
+                    cfg.mobility_depth1_var,
+                    cfg.mobility_depth2_var,
+                    cfg.mobility_depth3plus_var,
+                ],
+                dtype=torch.float32,
+            )
+            raw_init = torch.log(torch.expm1(torch.clamp(bucket_init, min=1e-6)))
+            self.dhalf_bucket_raw = nn.Parameter(raw_init)
+        else:
+            self.register_parameter("dhalf_bucket_raw", None)
 
         eigvals, eigvecs = torch.linalg.eigh(cov)
         eigvals = torch.clamp(eigvals, min=max(cfg.covariance_jitter, 1e-8))
         mean_eig = torch.clamp(eigvals.mean(), min=max(cfg.covariance_jitter, 1e-8))
         mode_rates = torch.pow(eigvals / mean_eig, cfg.beta_matrix_power)
-        mode_rates = torch.clamp(
+        mode_rates = _clamp_optional(
             mode_rates,
-            min=float(cfg.beta_matrix_min_rate),
-            max=float(cfg.beta_matrix_max_rate),
+            min_value=cfg.beta_matrix_min_rate,
+            max_value=cfg.beta_matrix_max_rate,
         )
         spectral_alpha_bars = torch.pow(
             self.schedule.alpha_bars.unsqueeze(1).to(torch.float32),
@@ -849,6 +941,47 @@ class TimeResidualConditionalDiffusion(nn.Module):
             allow_no_conditioning=cfg.allow_no_conditioning,
         )
 
+    def _current_bucket_variances(self) -> Optional[torch.Tensor]:
+        if not self.learnable_dhalf or self.dhalf_bucket_raw is None:
+            return None
+        return torch.nn.functional.softplus(self.dhalf_bucket_raw) + 1e-6
+
+    def _dynamic_spectral_state(self) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        if not self.learnable_dhalf:
+            return None
+        if self.cov_builder is None:
+            return (
+                self.beta_basis,
+                self.beta_basis_t,
+                self.spectral_alpha_bars,
+            )
+        bucket_variances = self._current_bucket_variances()
+        empirical_feature_covariance = self._empirical_feature_covariance
+        if empirical_feature_covariance is not None and bucket_variances is not None:
+            empirical_feature_covariance = empirical_feature_covariance.to(
+                device=bucket_variances.device,
+                dtype=torch.float32,
+            )
+        cov = self.cov_builder.build_feature_covariance(
+            empirical_feature_covariance=empirical_feature_covariance,
+            bucket_variances=bucket_variances,
+        ).to(torch.float32)
+        eigvals, eigvecs = torch.linalg.eigh(cov)
+        eigvals = torch.clamp(eigvals, min=max(self.cfg.covariance_jitter, 1e-8))
+        mean_eig = torch.clamp(eigvals.mean(), min=max(self.cfg.covariance_jitter, 1e-8))
+        mode_rates = torch.pow(eigvals / mean_eig, self.cfg.beta_matrix_power)
+        mode_rates = _clamp_optional(
+            mode_rates,
+            min_value=self.cfg.beta_matrix_min_rate,
+            max_value=self.cfg.beta_matrix_max_rate,
+        )
+        spectral_alpha_bars = torch.pow(
+            self.schedule.alpha_bars.unsqueeze(1).to(device=mode_rates.device, dtype=torch.float32),
+            mode_rates.unsqueeze(0),
+        )
+        spectral_alpha_bars = torch.clamp(spectral_alpha_bars, min=1e-8, max=1.0)
+        return eigvecs, eigvecs.t(), spectral_alpha_bars
+
     def _select_free_joints(self, x: torch.Tensor, T: int, name: str) -> torch.Tensor:
         _assert_shape(x, (None, T, self.cfg.num_nodes, 3), name)
         return x[:, :, self.free_indices, :]
@@ -866,17 +999,37 @@ class TimeResidualConditionalDiffusion(nn.Module):
         return full
 
     def _spectral_schedule_rows(
-        self, timesteps: torch.Tensor, dtype: torch.dtype
+        self,
+        timesteps: torch.Tensor,
+        dtype: torch.dtype,
+        spectral_state: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        alpha_bars = _index_schedule_rows(self.spectral_alpha_bars, timesteps, dtype)
+        if spectral_state is None:
+            spectral_state = self._dynamic_spectral_state()
+        alpha_bars_source = self.spectral_alpha_bars if spectral_state is None else spectral_state[2]
+        alpha_bars = _index_schedule_rows(alpha_bars_source, timesteps, dtype)
         return alpha_bars, torch.sqrt(alpha_bars), torch.sqrt(torch.clamp(1.0 - alpha_bars, min=0.0))
 
-    def _to_spectral(self, x: torch.Tensor) -> torch.Tensor:
-        basis = self.beta_basis.to(device=x.device, dtype=x.dtype)
+    def _to_spectral(
+        self,
+        x: torch.Tensor,
+        spectral_state: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        if spectral_state is None:
+            spectral_state = self._dynamic_spectral_state()
+        basis_source = self.beta_basis if spectral_state is None else spectral_state[0]
+        basis = basis_source.to(device=x.device, dtype=x.dtype)
         return torch.matmul(x, basis)
 
-    def _from_spectral(self, z: torch.Tensor) -> torch.Tensor:
-        basis_t = self.beta_basis_t.to(device=z.device, dtype=z.dtype)
+    def _from_spectral(
+        self,
+        z: torch.Tensor,
+        spectral_state: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        if spectral_state is None:
+            spectral_state = self._dynamic_spectral_state()
+        basis_t_source = self.beta_basis_t if spectral_state is None else spectral_state[1]
+        basis_t = basis_t_source.to(device=z.device, dtype=z.dtype)
         return torch.matmul(z, basis_t)
 
     def training_loss(
@@ -898,15 +1051,20 @@ class TimeResidualConditionalDiffusion(nn.Module):
         x0 = residual_gt_free.float()
         device = residual_gt_free.device
         t = torch.randint(0, self.cfg.diffusion_steps, (B,), device=device, dtype=torch.long)
-        x0_z = self._to_spectral(x0)
+        spectral_state = self._dynamic_spectral_state()
+        x0_z = self._to_spectral(x0, spectral_state=spectral_state)
         eps_z = torch.randn_like(x0_z)
-        _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._spectral_schedule_rows(t, x0.dtype)
+        _, sqrt_alpha_bars, sqrt_one_minus_alpha_bars = self._spectral_schedule_rows(
+            t,
+            x0.dtype,
+            spectral_state=spectral_state,
+        )
         sqrt_ab = sqrt_alpha_bars.unsqueeze(1)
         sqrt_omb = sqrt_one_minus_alpha_bars.unsqueeze(1)
         x_t_z = sqrt_ab * x0_z + sqrt_omb * eps_z
         v_z = sqrt_ab * eps_z - sqrt_omb * x0_z
-        x_t = self._from_spectral(x_t_z)
-        v = self._from_spectral(v_z)
+        x_t = self._from_spectral(x_t_z, spectral_state=spectral_state)
+        v = self._from_spectral(v_z, spectral_state=spectral_state)
 
         v_hat = self.denoiser(
             x_t.to(dtype=history_free.dtype),
@@ -955,12 +1113,14 @@ class TimeResidualConditionalDiffusion(nn.Module):
             (B, self.cfg.pred_length, self.free_feature_dim),
             device=device, dtype=torch.float32, generator=gen,
         )
+        spectral_state = self._dynamic_spectral_state()
         alpha_init, _, sqrt_omb_init = self._spectral_schedule_rows(
             torch.full((B,), int(t_seq[0].item()), device=device, dtype=torch.long),
             x.dtype,
+            spectral_state=spectral_state,
         )
         del alpha_init
-        x = self._from_spectral(sqrt_omb_init.unsqueeze(1) * x)
+        x = self._from_spectral(sqrt_omb_init.unsqueeze(1) * x, spectral_state=spectral_state)
 
         for idx in range(t_seq.numel()):
             t_int = int(t_seq[idx].item())
@@ -971,13 +1131,17 @@ class TimeResidualConditionalDiffusion(nn.Module):
             v_hat = self.denoiser(
                 x_input, t_batch, history_free, coarse_free, mamp_feat=mamp_feat,
             ).float()
-            _, sqrt_alpha_bars_t, sqrt_one_minus_alpha_bars_t = self._spectral_schedule_rows(t_batch, x.dtype)
+            _, sqrt_alpha_bars_t, sqrt_one_minus_alpha_bars_t = self._spectral_schedule_rows(
+                t_batch,
+                x.dtype,
+                spectral_state=spectral_state,
+            )
             sqrt_ab_t = sqrt_alpha_bars_t.unsqueeze(1)
             sqrt_omb_t = sqrt_one_minus_alpha_bars_t.unsqueeze(1)
-            x_z = self._to_spectral(x)
-            v_hat_z = self._to_spectral(v_hat)
+            x_z = self._to_spectral(x, spectral_state=spectral_state)
+            v_hat_z = self._to_spectral(v_hat, spectral_state=spectral_state)
             x0_z = sqrt_ab_t * x_z - sqrt_omb_t * v_hat_z
-            x0 = self._from_spectral(x0_z)
+            x0 = self._from_spectral(x0_z, spectral_state=spectral_state)
             if clip > 0.0:
                 x0 = torch.clamp(x0, -clip, clip)
                 x0_z = self._to_spectral(x0)

@@ -218,6 +218,8 @@ def _build_train_cfg(
     cfg.twostage_mobility_depth3plus_var = _coerce_optional(
         best_cfg.get("twostage_mobility_depth3plus_var"), float
     )
+    cfg.twostage_dhalf_gamma = _coerce_optional(best_cfg.get("twostage_dhalf_gamma"), float)
+    cfg.twostage_learnable_dhalf = _coerce_optional(best_cfg.get("twostage_learnable_dhalf"), bool)
     cfg.twostage_graph_laplacian_alpha = _coerce_optional(
         best_cfg.get("twostage_graph_laplacian_alpha"), float
     )

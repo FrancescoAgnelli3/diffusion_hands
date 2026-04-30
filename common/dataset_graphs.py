@@ -100,38 +100,23 @@ BIGHAND_HAND_GROUPS: Tuple[dict, ...] = (
     },
 )
 
-FPHA_HAND_GROUPS: Tuple[dict, ...] = (
+FPHA_HAND_GROUPS: Tuple[dict, ...] = BIGHAND_HAND_GROUPS
+
+H2O_HAND_GROUPS: Tuple[dict, ...] = (
     {
         "wrist_index": 0,
         "nodes": tuple(range(0, 21)),
         "links": tuple(
             [
-                (0, 7),
-                (7, 6),
-                (1, 10),
-                (10, 9),
-                (9, 8),
-                (2, 13),
-                (13, 12),
-                (12, 11),
-                (3, 16),
-                (16, 15),
-                (15, 14),
-                (4, 19),
-                (19, 18),
-                (18, 17),
-                (5, 6),
-                (5, 8),
-                (5, 11),
-                (5, 14),
-                (5, 17),
-                (0, 20),
+                (0, 1),  (1, 2),  (2, 3),  (3, 4),
+                (0, 5),  (5, 6),  (6, 7),  (7, 8),
+                (0, 9),  (9, 10), (10, 11), (11, 12),
+                (0, 13), (13, 14), (14, 15), (15, 16),
+                (0, 17), (17, 18), (18, 19), (19, 20)
             ]
         ),
     },
 )
-
-H2O_HAND_GROUPS: Tuple[dict, ...] = FPHA_HAND_GROUPS
 
 
 DATASET_GRAPH_METADATA: Dict[str, Dict[str, object]] = {

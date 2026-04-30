@@ -62,6 +62,8 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "twostage_mobility_depth1_var": 0.35,
         "twostage_mobility_depth2_var": 0.70,
         "twostage_mobility_depth3plus_var": 1.00,
+        "twostage_dhalf_gamma": 1.0,
+        "twostage_learnable_dhalf": False,
         "twostage_graph_laplacian_alpha": 0.0,
         "twostage_graph_laplacian_beta": 1.0,
         "twostage_graph_laplacian_normalized": True,
@@ -155,6 +157,8 @@ class TrainCfg:
     twostage_mobility_depth1_var: Optional[float] = None
     twostage_mobility_depth2_var: Optional[float] = None
     twostage_mobility_depth3plus_var: Optional[float] = None
+    twostage_dhalf_gamma: Optional[float] = None
+    twostage_learnable_dhalf: Optional[bool] = None
     twostage_graph_laplacian_alpha: Optional[float] = None
     twostage_graph_laplacian_beta: Optional[float] = None
     twostage_graph_laplacian_normalized: Optional[bool] = None

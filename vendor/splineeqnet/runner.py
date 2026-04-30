@@ -202,6 +202,8 @@ def run_experiment(
         ("twostage_mobility_depth1_var", train_cfg.twostage_mobility_depth1_var, float),
         ("twostage_mobility_depth2_var", train_cfg.twostage_mobility_depth2_var, float),
         ("twostage_mobility_depth3plus_var", train_cfg.twostage_mobility_depth3plus_var, float),
+        ("twostage_dhalf_gamma", train_cfg.twostage_dhalf_gamma, float),
+        ("twostage_learnable_dhalf", train_cfg.twostage_learnable_dhalf, bool),
         ("twostage_graph_laplacian_alpha", train_cfg.twostage_graph_laplacian_alpha, float),
         ("twostage_graph_laplacian_beta", train_cfg.twostage_graph_laplacian_beta, float),
         ("twostage_graph_laplacian_normalized", train_cfg.twostage_graph_laplacian_normalized, bool),
@@ -227,9 +229,13 @@ def run_experiment(
         ("twostage_graph_laplacian_tau", train_cfg.twostage_graph_laplacian_tau, float),
         ("twostage_covariance_jitter", train_cfg.twostage_covariance_jitter, float),
     ]
+    twostage_nullable_fields = {
+        "twostage_beta_matrix_min_rate",
+        "twostage_beta_matrix_max_rate",
+    }
     for key, value, caster in twostage_fields:
-        if value is not None:
-            config[key] = caster(value)
+        if value is not None or key in twostage_nullable_fields:
+            config[key] = None if value is None else caster(value)
 
     cfg_dict = asdict(train_cfg)
     cfg_dict["dataset"] = asdict(ds)

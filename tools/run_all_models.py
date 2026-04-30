@@ -112,6 +112,21 @@ def _save_eval_samples_enabled(model_cfg: dict) -> bool:
     return bool(model_cfg.get("save_eval_samples", True))
 
 
+def _load_existing_result_keys(csv_path: Path) -> set[tuple[str, str, str]]:
+    if not csv_path.exists():
+        return set()
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return {
+            (
+                str(row.get("dataset", "") or ""),
+                str(row.get("action_filter", "") or ""),
+                str(row.get("model", "") or ""),
+            )
+            for row in reader
+        }
+
+
 def _resolve_model_cfg_entry(model_name: str, entry: object, config_dir: Path) -> dict:
     entry_overrides: Dict[str, object] = {}
     if isinstance(entry, str):
@@ -320,7 +335,6 @@ def run_twostage(model_name: str, dataset: str, data_dir: Path, action_filter: s
     save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
     samples_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
-    run_root = _vendor_model_run_root("splineeqnet", model_name, run_id)
     best_cfg = deepcopy(_as_dict(mcfg.get("defaults")))
     if not best_cfg:
         raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
@@ -346,58 +360,66 @@ def run_twostage(model_name: str, dataset: str, data_dir: Path, action_filter: s
         if "monitor" in es_cfg:
             best_cfg["early_stopping_monitor"] = str(es_cfg.get("monitor"))
 
-    best_json = run_root / "twostage_best_config.json"
-    out_eval_base = run_root / "twostage_eval.csv"
-    save_root = run_root / "checkpoints"
     eval_examples_path = samples_root / "eval_samples.npz" if samples_root is not None else None
-    with open(best_json, "w", encoding="utf-8") as f:
-        json.dump({"twostage_dct_diffusion": best_cfg}, f, indent=2)
-    rc = _run(
-        [
-            PYTHON,
-            "train_best_models.py",
-            "--model",
-            "twostage_dct_diffusion",
-            "--dataset",
-            str(dataset),
-            "--data-dir",
-            str(data_dir),
-            "--action-filter",
-            str(action_filter),
-            "--eval-split",
-            "test",
-            "--seed",
-            str(cfg["seed"]),
-            "--window",
-            str(int(pp["input_n"])),
-            "--horizon",
-            str(int(pp["output_n"])),
-            "--eval-batch-mult",
-            str(int(pp["eval_batch_mult"])),
-            "--best-json",
-            str(best_json),
-            "--num-candidates",
-            str(cfg["num_candidates"]),
-            "--humanmac-multimodal-threshold",
-            str(cfg["humanmac_multimodal_threshold"]),
-            *(["--epochs", str(int(epochs))] if epochs is not None else []),
-            *(["--save-eval-examples"] if save_eval_samples else []),
-            *(["--eval-examples-path", str(eval_examples_path)] if eval_examples_path is not None else []),
-            "--results-csv",
-            str(out_eval_base),
-            "--save-root",
-            str(save_root),
-        ],
-        cwd=wd,
-        env=_gpu_subprocess_env(cfg),
-    )
-    if rc != 0:
-        raise RuntimeError("twostage training failed")
+    with tempfile.TemporaryDirectory(prefix="twostage_") as td:
+        temp_root = Path(td)
+        run_root = (
+            _vendor_model_run_root("splineeqnet", model_name, run_id)
+            if save_eval_samples
+            else temp_root / "run"
+        )
+        run_root.mkdir(parents=True, exist_ok=True)
+        best_json = run_root / "twostage_best_config.json"
+        out_eval_base = run_root / "twostage_eval.csv"
+        save_root = run_root / "checkpoints"
+        with open(best_json, "w", encoding="utf-8") as f:
+            json.dump({"twostage_dct_diffusion": best_cfg}, f, indent=2)
+        rc = _run(
+            [
+                PYTHON,
+                "train_best_models.py",
+                "--model",
+                "twostage_dct_diffusion",
+                "--dataset",
+                str(dataset),
+                "--data-dir",
+                str(data_dir),
+                "--action-filter",
+                str(action_filter),
+                "--eval-split",
+                "test",
+                "--seed",
+                str(cfg["seed"]),
+                "--window",
+                str(int(pp["input_n"])),
+                "--horizon",
+                str(int(pp["output_n"])),
+                "--eval-batch-mult",
+                str(int(pp["eval_batch_mult"])),
+                "--best-json",
+                str(best_json),
+                "--num-candidates",
+                str(cfg["num_candidates"]),
+                "--humanmac-multimodal-threshold",
+                str(cfg["humanmac_multimodal_threshold"]),
+                *(["--epochs", str(int(epochs))] if epochs is not None else []),
+                *(["--save-eval-examples"] if save_eval_samples else []),
+                *(["--eval-examples-path", str(eval_examples_path)] if eval_examples_path is not None else []),
+                "--results-csv",
+                str(out_eval_base),
+                "--save-root",
+                str(save_root),
+            ],
+            cwd=wd,
+            env=_gpu_subprocess_env(cfg),
+        )
+        if rc != 0:
+            raise RuntimeError("twostage training failed")
 
-    out_candidates = sorted(run_root.glob("**/*.csv"), key=os.path.getmtime)
-    if not out_candidates:
-        raise RuntimeError(f"twostage did not produce any metrics CSV under {run_root}")
-    row = read_one_row_csv(out_candidates[-1])
+        out_candidates = sorted(run_root.glob("**/*.csv"), key=os.path.getmtime)
+        if not out_candidates:
+            raise RuntimeError(f"twostage did not produce any metrics CSV under {run_root}")
+        row = read_one_row_csv(out_candidates[-1])
 
     return normalize_metrics_dict(row)
 
@@ -503,6 +525,10 @@ def run_comusion(model_name: str, dataset: str, data_dir: Path, action_filter: s
     template["data_specs"]["window_norm"] = pp.get("window_norm")
     template["data_specs"]["eval_batch_mult"] = int(pp["eval_batch_mult"])
     template["data_specs"]["splineeqnet_root"] = str(VENDOR / "splineeqnet")
+    # Keep CoMusion's multimodal grouping consistent with the shared
+    # experiment-level evaluation threshold used by the other runners.
+    template["data_specs"]["multimodal_threshold"] = float(cfg["humanmac_multimodal_threshold"])
+    template["data_specs"]["humanmac_multimodal_threshold"] = float(cfg["humanmac_multimodal_threshold"])
     template["eval_sample_num"] = int(cfg["num_candidates"])
     template.setdefault("diff_specs", {})
     if template["diff_specs"].get("div_k") is None:
@@ -1117,6 +1143,7 @@ def main() -> None:
     runtime = _resolve_runtime(cfg)
     out_root = Path(runtime["output_root"])
     aggregate_csv = Path(runtime["aggregate_csv"])
+    existing_result_keys = _load_existing_result_keys(aggregate_csv)
 
     out_root.mkdir(parents=True, exist_ok=True)
     _cleanup_legacy_result_artifacts(out_root)
@@ -1140,6 +1167,13 @@ def main() -> None:
 
             for model_name, model_cfg in cfg.get("models", {}).items():
                 if not bool(model_cfg.get("enabled", False)):
+                    continue
+                row_key = (str(dataset), str(action_filter), str(model_name))
+                if row_key in existing_result_keys:
+                    print(
+                        f"[REUSE] skipping existing result dataset={dataset} "
+                        f"action_filter={action_filter!r} model={model_name}"
+                    )
                     continue
                 base_model = str(model_cfg.get("base_model", model_name)).strip().lower()
                 fn = runners.get(base_model)
@@ -1167,6 +1201,7 @@ def main() -> None:
                     row["notes"] = f"{prefix} | {exc}" if prefix else str(exc)
                     print(f"[{dataset}:{model_name}] FAILED: {exc}")
                 _append_long_csv(aggregate_csv, row)
+                existing_result_keys.add(row_key)
 
     print(f"[DONE] aggregate metrics csv: {aggregate_csv}")
 

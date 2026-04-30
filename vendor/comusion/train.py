@@ -331,10 +331,12 @@ class Trainer(object):
                         f"mean={float(norm_factor.mean().item()):.6f}"
                     )
 
+                conditioning_context = data_flat[:, :self.input_n, :].reshape(gt.shape[0], self.input_n, -1, 3)
+
                 batch_eval = SPLINEEQNET_DIFFUSION_BATCH_EVAL(
                     pred.permute(1, 0, 2, 3).contiguous(),  # [K, B, T, NC]
                     gt,
-                    data_flat.to(self.device).to(self.dtype),
+                    conditioning_context.to(self.device).to(self.dtype),
                     norm_factor,
                     threshold=float(self.cfg.humanmac_multimodal_threshold),
                 )
@@ -347,10 +349,10 @@ class Trainer(object):
 
                 hm_pred_batches.append(pred.permute(1, 0, 2, 3).detach().cpu())
                 hm_gt_batches.append(gt.detach().cpu())
-                hm_context_batches.append(data_flat.detach().cpu())
+                hm_context_batches.append(conditioning_context.detach().cpu())
                 pred_first_all = pred[0].reshape(k, self.cfg.t_pred, -1, 3)
                 gt_first = gt[0].reshape(self.cfg.t_pred, -1, 3)
-                obs_first = data_flat[0].reshape(self.cfg.t_his, -1, 3)
+                obs_first = conditioning_context[0]
                 best_idx = torch.norm(pred_first_all - gt_first.unsqueeze(0), dim=-1).mean(dim=(1, 2)).argmin()
                 saved_obs.append(obs_first.detach().cpu())
                 saved_tgt.append(gt_first.detach().cpu())

@@ -329,6 +329,8 @@ def _resolve_runtime(cfg: dict) -> Dict[str, str]:
 def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, cfg: dict, run_id: str) -> Dict[str, object]:
     wd = VENDOR / "splineeqnet"
     mcfg = cfg.get("models", {}).get(model_name, {})
+    base_model = str(mcfg.get("base_model", model_name)).strip().lower()
+    target_model = "simlpe_dct" if base_model == "simlpe_dct" else "card"
     save_eval_samples = _save_eval_samples_enabled(mcfg)
     pp = _as_dict(cfg.get("_shared_preprocessing"))
     samples_root = _maybe_model_run_root(model_name, run_id, save_eval_samples)
@@ -336,7 +338,7 @@ def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
     best_cfg = deepcopy(_as_dict(mcfg.get("defaults")))
     if not best_cfg:
         raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
-    best_cfg["model"] = "card"
+    best_cfg["model"] = target_model
     best_cfg["input_n"] = int(pp["input_n"])
     best_cfg["output_n"] = int(pp["output_n"])
     best_cfg["stride"] = int(pp["stride"])
@@ -377,7 +379,7 @@ def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
                 PYTHON,
                 "train_best_models.py",
                 "--model",
-                "card",
+                target_model,
                 "--dataset",
                 str(dataset),
                 "--data-dir",
@@ -413,11 +415,11 @@ def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
             env=_gpu_subprocess_env(cfg),
         )
         if rc != 0:
-            raise RuntimeError("card training failed")
+            raise RuntimeError(f"{target_model} training failed")
 
         out_candidates = sorted(run_root.glob("**/*.csv"), key=os.path.getmtime)
         if not out_candidates:
-            raise RuntimeError(f"card did not produce any metrics CSV under {run_root}")
+            raise RuntimeError(f"{target_model} did not produce any metrics CSV under {run_root}")
         row = read_one_row_csv(out_candidates[-1])
 
     return normalize_metrics_dict(row)
@@ -1151,6 +1153,7 @@ def main() -> None:
 
     runners = {
         "card": run_card,
+        "simlpe_dct": run_card,
         "belfusion": run_belfusion,
         "comusion": run_comusion,
         "dlow_cvae": run_dlow_cvae,

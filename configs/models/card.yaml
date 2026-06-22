@@ -21,7 +21,7 @@ defaults:
   simlpe_use_spatial_fc_only: false
   simlpe_mix_spatial_temporal: false
   simlpe_add_last_offset: true
-  card_k_low: 60
+  card_k_low: 80
   card_diffusion_epochs: 200
   card_diffusion_steps: 50
   card_ddim_steps: 25

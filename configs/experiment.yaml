@@ -17,12 +17,12 @@ preprocessing:
 # Use one dataset via `dataset`, or multiple datasets via `datasets`.
 # When `datasets` is set, each dataset is processed sequentially:
 # load data -> train/eval all enabled models -> next dataset.
-datasets: [assembly, bighands, h2o, fpha]
+datasets: [assembly, h2o, bighands]
 # datasets: [bighands]
 # Use one action as a string, or multiple assembly actions as a list.
 # If empty, defaults to pick_up_screwd only for assembly.
 # action_filter: ["pick_up_screwd"]
-action_filter: ["attempt", "remove", "rotate", "put", "pick", "unscrew"]
+action_filter: ["put", "pick"]
 
 models:
   card:

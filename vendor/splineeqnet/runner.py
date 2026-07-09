@@ -258,6 +258,8 @@ def run_experiment(
         ("card_mobility_depth1_var", train_cfg.card_mobility_depth1_var, float),
         ("card_mobility_depth2_var", train_cfg.card_mobility_depth2_var, float),
         ("card_mobility_depth3plus_var", train_cfg.card_mobility_depth3plus_var, float),
+        ("card_dhalf_init_mode", train_cfg.card_dhalf_init_mode, str),
+        ("card_dhalf_data_scale", train_cfg.card_dhalf_data_scale, str),
         ("card_dhalf_gamma", train_cfg.card_dhalf_gamma, float),
         ("card_learnable_dhalf", train_cfg.card_learnable_dhalf, bool),
         ("card_graph_laplacian_alpha", train_cfg.card_graph_laplacian_alpha, float),

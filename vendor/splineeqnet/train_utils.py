@@ -3,7 +3,8 @@ import math
 import os
 import sys
 import time
-from typing import Optional, Dict, List, Tuple, Any
+from collections import deque
+from typing import Optional, Dict, List, Tuple, Any, Iterable
 
 import torch
 import torch.nn.functional as F
@@ -132,6 +133,103 @@ def _estimate_empirical_temporal_mean_covariance(
     centered = samples - samples.mean(dim=0, keepdim=True)
     cov = centered.t().matmul(centered) / float(samples.size(0) - 1)
     return cov.to(dtype=torch.float32)
+
+
+def _estimate_dhalf_bucket_variances_from_data(
+    loader: DataLoader,
+    *,
+    wrist_index: int,
+    node_num: int,
+    edges: Iterable[Tuple[int, int]],
+    scale_mode: str = "max",
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    adj: List[List[int]] = [[] for _ in range(int(node_num))]
+    for i, j in edges:
+        ii = int(i)
+        jj = int(j)
+        if not (0 <= ii < int(node_num) and 0 <= jj < int(node_num)) or ii == jj:
+            continue
+        if jj not in adj[ii]:
+            adj[ii].append(jj)
+        if ii not in adj[jj]:
+            adj[jj].append(ii)
+
+    dist = [-1] * int(node_num)
+    q: deque[int] = deque([int(wrist_index)])
+    dist[int(wrist_index)] = 0
+    while q:
+        u = q.popleft()
+        for v in adj[u]:
+            if dist[v] < 0:
+                dist[v] = dist[u] + 1
+                q.append(v)
+    if any(d < 0 for d in dist):
+        raise ValueError("Cannot estimate data-driven D_half variances because the hand graph is disconnected.")
+
+    bucket_sums = torch.zeros(4, dtype=torch.float64)
+    bucket_counts = torch.zeros(4, dtype=torch.float64)
+    for batch in loader:
+        if not isinstance(batch, (list, tuple)) or len(batch) < 2:
+            raise ValueError("Loader batch must provide input and target tensors.")
+        out = batch[1]
+        if out.ndim != 4 or out.size(-1) < 7:
+            raise ValueError(
+                "Expected target tensor with shape (B, T, N, C>=7) so target 3D coordinates can be read from out[..., 4:]."
+            )
+        tgt_3d = out[:, :, :, 4:].to(dtype=torch.float64, device="cpu")
+        if tgt_3d.shape[2] != node_num or tgt_3d.shape[3] != 3:
+            raise ValueError(
+                f"Expected target 3D tensor shape (B, T, {node_num}, 3), got {tuple(tgt_3d.shape)}"
+            )
+        joint_temporal_var = tgt_3d.var(dim=1, unbiased=False).mean(dim=-1)
+        for joint_idx in range(int(node_num)):
+            if joint_idx == int(wrist_index):
+                continue
+            d = dist[joint_idx]
+            if d <= 1:
+                bucket_idx = 0
+            elif d == 2:
+                bucket_idx = 1
+            elif d == 3:
+                bucket_idx = 2
+            else:
+                bucket_idx = 3
+            bucket_sums[bucket_idx] += joint_temporal_var[:, joint_idx].sum()
+            bucket_counts[bucket_idx] += float(joint_temporal_var.shape[0])
+
+    if torch.any(bucket_counts <= 0):
+        raise ValueError("Unable to estimate data-driven D_half variances for all mobility buckets.")
+
+    bucket_vars = bucket_sums / bucket_counts.clamp_min(1.0)
+    scale_mode_normalized = str(scale_mode or "max").strip().lower()
+    if scale_mode_normalized == "max":
+        bucket_vars = bucket_vars / bucket_vars.max().clamp_min(float(eps))
+    elif scale_mode_normalized == "mean":
+        bucket_vars = bucket_vars / bucket_vars.mean().clamp_min(float(eps))
+    elif scale_mode_normalized in {"none", "raw"}:
+        pass
+    else:
+        raise ValueError(
+            "card_dhalf_data_scale must be one of {'max', 'mean', 'raw', 'none'}, "
+            f"got {scale_mode!r}"
+        )
+    return bucket_vars.clamp_min(float(eps)).to(dtype=torch.float32)
+
+
+def _format_dhalf_bucket_log(
+    *,
+    palm_var: float,
+    depth1_var: float,
+    depth2_var: float,
+    depth3plus_var: float,
+) -> str:
+    return (
+        f"D_var = [palm={float(palm_var):.6f}, "
+        f"depth1={float(depth1_var):.6f}, "
+        f"depth2={float(depth2_var):.6f}, "
+        f"depth3plus={float(depth3plus_var):.6f}]"
+    )
 
 def train(
     config: dict,
@@ -486,6 +584,8 @@ def train(
         mobility_depth1_var = float(config.get("card_mobility_depth1_var", 0.35))
         mobility_depth2_var = float(config.get("card_mobility_depth2_var", 0.70))
         mobility_depth3plus_var = float(config.get("card_mobility_depth3plus_var", 1.00))
+        dhalf_init_mode = str(config.get("card_dhalf_init_mode", "fixed")).strip().lower()
+        dhalf_data_scale = str(config.get("card_dhalf_data_scale", "max")).strip().lower()
         dhalf_gamma = float(config.get("card_dhalf_gamma", 1.0))
         learnable_dhalf = bool(config.get("card_learnable_dhalf", False))
         graph_laplacian_alpha = float(config.get("card_graph_laplacian_alpha", 0.0))
@@ -568,6 +668,44 @@ def train(
                 "card requires non-empty hand links. "
                 "Provide config['card_links'], ensure edge_index/adjacency includes hand edges, "
                 "enable card_isotropic_noise, or set card_spatial_anisotropy=false."
+            )
+
+        if dhalf_init_mode not in {"fixed", "data"}:
+            raise ValueError(
+                "card_dhalf_init_mode must be one of {'fixed', 'data'}, "
+                f"got {dhalf_init_mode!r}"
+            )
+        if dhalf_init_mode == "data":
+            estimated_bucket_vars = _estimate_dhalf_bucket_variances_from_data(
+                loader,
+                wrist_index=int(card_wrist_index),
+                node_num=node_num,
+                edges=card_links,
+                scale_mode=dhalf_data_scale,
+            )
+            mobility_palm_var = float(estimated_bucket_vars[0].item())
+            mobility_depth1_var = float(estimated_bucket_vars[1].item())
+            mobility_depth2_var = float(estimated_bucket_vars[2].item())
+            mobility_depth3plus_var = float(estimated_bucket_vars[3].item())
+            print(
+                "[Info] Estimated CARD D_var from train data "
+                f"(scale={dhalf_data_scale}): "
+                + _format_dhalf_bucket_log(
+                    palm_var=mobility_palm_var,
+                    depth1_var=mobility_depth1_var,
+                    depth2_var=mobility_depth2_var,
+                    depth3plus_var=mobility_depth3plus_var,
+                )
+            )
+        elif model == "card":
+            print(
+                "[Info] Using configured CARD D_var: "
+                + _format_dhalf_bucket_log(
+                    palm_var=mobility_palm_var,
+                    depth1_var=mobility_depth1_var,
+                    depth2_var=mobility_depth2_var,
+                    depth3plus_var=mobility_depth3plus_var,
+                )
             )
 
         empirical_feature_covariance = None

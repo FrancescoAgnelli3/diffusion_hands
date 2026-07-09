@@ -73,6 +73,8 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "card_mobility_depth1_var": 0.35,
         "card_mobility_depth2_var": 0.70,
         "card_mobility_depth3plus_var": 1.00,
+        "card_dhalf_init_mode": "fixed",
+        "card_dhalf_data_scale": "max",
         "card_dhalf_gamma": 1.0,
         "card_learnable_dhalf": False,
         "card_graph_laplacian_alpha": 0.0,
@@ -179,6 +181,8 @@ class TrainCfg:
     card_mobility_depth1_var: Optional[float] = None
     card_mobility_depth2_var: Optional[float] = None
     card_mobility_depth3plus_var: Optional[float] = None
+    card_dhalf_init_mode: Optional[str] = None
+    card_dhalf_data_scale: Optional[str] = None
     card_dhalf_gamma: Optional[float] = None
     card_learnable_dhalf: Optional[bool] = None
     card_graph_laplacian_alpha: Optional[float] = None

@@ -12,9 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Iterator, List, Tuple
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -110,53 +107,6 @@ def extract_pairwise_posterior_triplet(result, left_label: str, right_label: str
     raise RuntimeError(
         f"Could not extract posterior triplet for pair ({left_label}, {right_label}) from posterior_matrix."
     )
-
-
-def posterior_triplet_to_xy(p_left: float, p_equal: float, p_right: float) -> Tuple[float, float]:
-    x = float(p_right) + 0.5 * float(p_equal)
-    y = (math.sqrt(3.0) / 2.0) * float(p_equal)
-    return x, y
-
-
-def plot_posterior_triangle(
-    p_left: float,
-    p_equal: float,
-    p_right: float,
-    *,
-    left_label: str,
-    equal_label: str,
-    right_label: str,
-    title: str,
-):
-    left = (0.0, 0.0)
-    right = (1.0, 0.0)
-    top = (0.5, math.sqrt(3.0) / 2.0)
-    x, y = posterior_triplet_to_xy(p_left, p_equal, p_right)
-
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.plot([left[0], right[0]], [left[1], right[1]], color="black", linewidth=1.2)
-    ax.plot([right[0], top[0]], [right[1], top[1]], color="black", linewidth=1.2)
-    ax.plot([top[0], left[0]], [top[1], left[1]], color="black", linewidth=1.2)
-
-    for level in (0.25, 0.5, 0.75):
-        y_level = top[1] * level
-        x_left = 0.5 * level
-        x_right = 1.0 - 0.5 * level
-        ax.plot([x_left, x_right], [y_level, y_level], color="lightgray", linestyle="--", linewidth=0.8, zorder=0)
-
-    ax.scatter([x], [y], s=140, color="crimson", edgecolor="black", linewidth=0.6, zorder=3)
-    ax.text(x, y + 0.045, f"({p_left:.3f}, {p_equal:.3f}, {p_right:.3f})", ha="center", va="bottom", fontsize=9)
-
-    ax.text(left[0] - 0.04, left[1] - 0.04, left_label, ha="right", va="top")
-    ax.text(right[0] + 0.04, right[1] - 0.04, right_label, ha="left", va="top")
-    ax.text(top[0], top[1] + 0.05, equal_label, ha="center", va="bottom")
-
-    ax.set_title(title)
-    ax.set_aspect("equal")
-    ax.set_xlim(-0.1, 1.1)
-    ax.set_ylim(-0.1, top[1] + 0.14)
-    ax.axis("off")
-    return fig, ax
 
 
 def load_yaml(path: Path) -> dict:
@@ -768,14 +718,12 @@ def save_metric_artifacts(
 ) -> None:
     log(f"Saving Bayesian signed-rank artifacts under {output_dir}")
     with prepend_sys_path(AUTORANK_ROOT):
-        from autorank import autorank, create_report, plot_posterior_maps
+        from autorank import autorank, create_report
 
         output_dir.mkdir(parents=True, exist_ok=True)
         paired_dir = output_dir / "paired_metric_tables"
-        plots_dir = output_dir / "plots"
         reports_dir = output_dir / "reports"
         paired_dir.mkdir(parents=True, exist_ok=True)
-        plots_dir.mkdir(parents=True, exist_ok=True)
         reports_dir.mkdir(parents=True, exist_ok=True)
 
         combined = card_table[["sample_idx"]].copy()
@@ -818,30 +766,6 @@ def save_metric_artifacts(
                 create_report(result)
             with open(reports_dir / f"{metric.lower()}_report.txt", "w", encoding="utf-8") as handle:
                 handle.write(report_buffer.getvalue())
-
-            fig, axes = plt.subplots(1, 4, figsize=(12, 3))
-            plot_posterior_maps(result, axes=list(axes), width=12)
-            fig.suptitle(f"Bayesian signed-rank posterior maps: {metric}")
-            fig.tight_layout()
-            fig.savefig(plots_dir / f"{metric.lower()}_posterior_maps.png", dpi=200, bbox_inches="tight")
-            plt.close(fig)
-
-            p_left, p_equal, p_right = extract_pairwise_posterior_triplet(
-                result,
-                "card",
-                "comusion",
-            )
-            tri_fig, _tri_ax = plot_posterior_triangle(
-                p_left,
-                p_equal,
-                p_right,
-                left_label="card < comusion",
-                equal_label="practically equal",
-                right_label="card > comusion",
-                title=f"Bayesian posterior triangle: {metric}",
-            )
-            tri_fig.savefig(plots_dir / f"{metric.lower()}_triangle.png", dpi=200, bbox_inches="tight")
-            plt.close(tri_fig)
             log(f"Saved artifacts for {metric}")
 
 

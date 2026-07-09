@@ -34,88 +34,89 @@ models:
   card_base:
     <<: *card_ablation_base
     notes: "baseline: exact configs/models/card.yaml"
+    
 
-  # Conditioning ablations (baseline has coarse=true)
-  card_no_coarse_cond:
-    <<: *card_ablation_base
-    notes: "ablation: remove coarse prediction conditioning"
-    defaults:
-      save_eval_examples: false
-      card_cond_use_history: true
-      card_cond_use_coarse: false
+  # # Conditioning ablations (baseline has coarse=true)
+  # card_no_coarse_cond:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: remove coarse prediction conditioning"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_cond_use_history: true
+  #     card_cond_use_coarse: false
 
-  # Coarse-stage training ablations
-  card_freeze_coarse:
-    <<: *card_ablation_base
-    notes: "ablation: freeze coarse model during diffusion stage"
-    defaults:
-      save_eval_examples: false
-      card_freeze_coarse: true
+  # # Coarse-stage training ablations
+  # card_freeze_coarse:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: freeze coarse model during diffusion stage"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_freeze_coarse: true
 
-  card_lowpass_coarse_gt:
-    <<: *card_ablation_base
-    notes: "ablation: supervise coarse stage with low-pass-only target"
-    defaults:
-      save_eval_examples: false
-      card_coarse_target_lowpass_only: true
+  # card_lowpass_coarse_gt:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: supervise coarse stage with low-pass-only target"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_coarse_target_lowpass_only: true
 
-  card_coarse_dim_64:
-    <<: *card_ablation_base
-    notes: "ablation: reduce card denoiscoarseer hidden dimension to 64"
-    defaults:
-      save_eval_examples: false
-      hidden_size: 64
+  # card_coarse_dim_64:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: reduce card denoiscoarseer hidden dimension to 64"
+  #   defaults:
+  #     save_eval_examples: false
+  #     hidden_size: 64
 
-  card_coarse_dim_256:
-    <<: *card_ablation_base
-    notes: "ablation: increase card denoiscoarseer hidden dimension to 256"
-    defaults:
-      save_eval_examples: false
-      hidden_size: 256
+  # card_coarse_dim_256:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: increase card denoiscoarseer hidden dimension to 256"
+  #   defaults:
+  #     save_eval_examples: false
+  #     hidden_size: 256
 
-  # Denoiser / diffusion noise ablations
-  card_denoiser_dim_64:
-    <<: *card_ablation_base
-    notes: "ablation: reduce card denoiser hidden dimension to 64"
-    defaults:
-      save_eval_examples: false
-      card_denoiser_dim: 64
+  # # Denoiser / diffusion noise ablations
+  # card_denoiser_dim_64:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: reduce card denoiser hidden dimension to 64"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_denoiser_dim: 64
 
-  card_denoiser_dim_128:
-    <<: *card_ablation_base
-    notes: "ablation: increase card denoiser hidden dimension to 256"
-    defaults:
-      save_eval_examples: false
-      card_denoiser_dim: 256
+  # card_denoiser_dim_128:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: increase card denoiser hidden dimension to 256"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_denoiser_dim: 256
 
-  card_denoiser_dim_512:
-    <<: *card_ablation_base
-    notes: "ablation: increase card denoiser hidden dimension to 512"
-    defaults:
-      save_eval_examples: false
-      batch_size: 256
-      card_denoiser_dim: 512
+  # card_denoiser_dim_512:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: increase card denoiser hidden dimension to 512"
+  #   defaults:
+  #     save_eval_examples: false
+  #     batch_size: 256
+  #     card_denoiser_dim: 512
 
-  card_denoiser_depth_4:
-    <<: *card_ablation_base
-    notes: "ablation: reduce card denoiser depth to 4"
-    defaults:
-      save_eval_examples: false
-      card_denoiser_depth: 4
+  # card_denoiser_depth_4:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: reduce card denoiser depth to 4"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_denoiser_depth: 4
 
-  card_denoiser_depth_8:
-    <<: *card_ablation_base
-    notes: "ablation: increase card denoiser depth to 8"
-    defaults:
-      save_eval_examples: false
-      card_denoiser_depth: 8
+  # card_denoiser_depth_8:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: increase card denoiser depth to 8"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_denoiser_depth: 8
 
-  card_dropout_01:
-    <<: *card_ablation_base
-    notes: "ablation: set card denoiser dropout to 0.1"
-    defaults:
-      save_eval_examples: false
-      card_dropout: 0.1
+  # card_dropout_01:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: set card denoiser dropout to 0.1"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_dropout: 0.1
 
   # card_isotropic_noise:
   #   <<: *card_ablation_base
@@ -153,31 +154,39 @@ models:
   #     card_graph_laplacian_normalized: false
   #     card_node_covariance_type: laplacian_heat_kernel
 
-  card_diagonal_noise:
-    <<: *card_ablation_base
-    notes: "ablation: replace Laplacian heat-kernel hand covariance with diagonal per-joint covariance"
-    defaults:
-      save_eval_examples: false
-      card_node_covariance_type: diagonal
+  # card_diagonal_noise:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: replace Laplacian heat-kernel hand covariance with diagonal per-joint covariance"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_node_covariance_type: diagonal
 
-  card_dhalf_gamma_05:
-    <<: *card_ablation_base
-    notes: "ablation: weaken mobility scaling by using D_half with gamma=0.5"
-    defaults:
-      save_eval_examples: false
-      card_dhalf_gamma: 0.5
+  # card_dhalf_gamma_05:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: weaken mobility scaling by using D_half with gamma=0.5"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_dhalf_gamma: 0.5
 
-  card_temporal_only_anisotropy:
+  card_dhalf_data_init:
     <<: *card_ablation_base
-    notes: "ablation: keep temporal anisotropy but disable spatial hand covariance anisotropy"
+    notes: "ablation: estimate D_half mobility weights from the train split before training and keep them fixed"
     defaults:
       save_eval_examples: false
-      card_spatial_anisotropy: false
-      card_temporal_anisotropy: true
-      card_temporal_anisotropy_q: 0.25
-      card_temporal_operator_type: velocity
-      card_temporal_velocity_weight: 1.0
-      card_temporal_acceleration_weight: 0.0
+      card_dhalf_init_mode: data
+      card_dhalf_data_scale: max
+
+  # card_temporal_only_anisotropy:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: keep temporal anisotropy but disable spatial hand covariance anisotropy"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_spatial_anisotropy: false
+  #     card_temporal_anisotropy: true
+  #     card_temporal_anisotropy_q: 0.25
+  #     card_temporal_operator_type: velocity
+  #     card_temporal_velocity_weight: 1.0
+  #     card_temporal_acceleration_weight: 0.0
 
   # card_temporal_acceleration_prior_q025:
   #   <<: *card_ablation_base
@@ -217,37 +226,37 @@ models:
   #     card_temporal_acceleration_weight: 1.0
   #     card_temporal_jerk_weight: 1.0
 
-  card_dhalf_gamma_15:
-    <<: *card_ablation_base
-    notes: "ablation: strengthen mobility scaling by using D_half with gamma=1.5"
-    defaults:
-      save_eval_examples: false
-      card_dhalf_gamma: 1.5
+  # card_dhalf_gamma_15:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: strengthen mobility scaling by using D_half with gamma=1.5"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_dhalf_gamma: 1.5
 
-  card_laplacian_only_noise:
-    <<: *card_ablation_base
-    notes: "ablation: use Laplacian heat-kernel hand covariance without diagonal per-joint scaling"
-    defaults:
-      save_eval_examples: false
-      card_node_covariance_type: laplacian_only
+  # card_laplacian_only_noise:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: use Laplacian heat-kernel hand covariance without diagonal per-joint scaling"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_node_covariance_type: laplacian_only
 
-  card_diffusion_only:
-    <<: *card_ablation_base
-    notes: "ablation: remove the coarse model and run history-conditioned diffusion directly"
-    train:
-      epochs: 0
-    defaults:
-      save_eval_examples: false
-      card_diffusion_only: true
-      card_cond_use_history: true
-      card_cond_use_coarse: false
+  # card_diffusion_only:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: remove the coarse model and run history-conditioned diffusion directly"
+  #   train:
+  #     epochs: 0
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_diffusion_only: true
+  #     card_cond_use_history: true
+  #     card_cond_use_coarse: false
 
-  card_beta_power_15:
-    <<: *card_ablation_base
-    notes: "ablation: increase spectral beta rate shaping power to 1.5"
-    defaults:
-      save_eval_examples: false
-      card_beta_matrix_power: 1.5
+  # card_beta_power_15:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: increase spectral beta rate shaping power to 1.5"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_beta_matrix_power: 1.5
 
   # card_no_eigenvalue_clipping_alpha_bar:
   #   <<: *card_ablation_base
@@ -257,17 +266,17 @@ models:
   #     card_beta_matrix_min_rate: null
   #     card_beta_matrix_max_rate: null
 
-  # DCT coarse budget ablations around baseline k_low=60
-  card_klow_40:
-    <<: *card_ablation_base
-    notes: "ablation: reduce low-frequency DCT budget from 60 to 40"
-    defaults:
-      save_eval_examples: false
-      card_k_low: 40
+  # # DCT coarse budget ablations around baseline k_low=60
+  # card_klow_40:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: reduce low-frequency DCT budget from 60 to 40"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_k_low: 40
 
-  card_klow_80:
-    <<: *card_ablation_base
-    notes: "ablation: increase low-frequency DCT budget from 60 to 80"
-    defaults:
-      save_eval_examples: false
-      card_k_low: 80
+  # card_klow_80:
+  #   <<: *card_ablation_base
+  #   notes: "ablation: increase low-frequency DCT budget from 60 to 80"
+  #   defaults:
+  #     save_eval_examples: false
+  #     card_k_low: 80

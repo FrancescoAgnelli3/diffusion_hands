@@ -45,6 +45,8 @@ defaults:
   card_mobility_depth1_var: 0.35
   card_mobility_depth2_var: 0.70
   card_mobility_depth3plus_var: 1.00
+  card_dhalf_init_mode: fixed
+  card_dhalf_data_scale: max
   card_dhalf_gamma: 1
   card_learnable_dhalf: false
   card_graph_laplacian_alpha: 0.0

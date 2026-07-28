@@ -2,7 +2,7 @@
 
 Training and evaluation workspace for CARD, a diffusion-based hand-motion forecasting model, with reproducible experiment configs, ablation runners, and dataset-specific orchestration.
 
-Hand prediction visualisation: [Watch the video](./pick_up_screwd_comparison.mp4)
+Hand prediction visualisation available at ./video.gif
 
 ## Project Layout
 

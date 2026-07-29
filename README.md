@@ -4,6 +4,8 @@ Training and evaluation workspace for CARD, a diffusion-based hand-motion foreca
 
 Hand prediction visualisation available at ./video.gif
 
+Anisotropy modes of the spatial covariance available at ./RepresentativeModes.mp4
+
 ## Project Layout
 
 - `configs/experiment.yaml`: main experiment configuration

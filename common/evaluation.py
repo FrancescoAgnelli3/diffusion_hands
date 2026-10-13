@@ -21,6 +21,7 @@ CANONICAL_LONG_HEADER: List[str] = [
     "timestamp",
     "dataset",
     "action_filter",
+    "seed",
     "model",
     "status",
     *CANONICAL_METRIC_KEYS,

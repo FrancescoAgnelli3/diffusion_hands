@@ -34,6 +34,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from models.simlpe_dct import SiMLPeConfig, SiMLPeBackbone, _build_dct_matrix
 
@@ -271,6 +272,19 @@ class CardConfig:
     denoiser_depth: int = 6
     denoiser_heads: int = 8
     dropout: float = 0.0
+    use_latent_variability: bool = False
+    latent_dim: int = 8
+    beta_kl: float = 1e-3
+    kl_anneal_steps: int = 0
+    latent_encoder_hidden_dim: int = 256
+    latent_conditioning_mode: str = "add"
+    num_actions: int = 1
+    explainable_latent_decomposition: bool = False
+    latent_action_dim: int = 4
+    latent_style_dim: int = 4
+    latent_residual_dim: int = 4
+    beta_action: float = 0.1
+    beta_adversarial: float = 0.1
 
     # Training
     freeze_coarse: bool = True
@@ -388,6 +402,159 @@ class CoarseDCTForecaster(nn.Module):
         if self.cfg.simlpe_add_last_offset:
             future_low = future_low + history[:, -1:, :, :]
         return future_low
+
+
+# ----------------------------- Latent variability -----------------------------
+
+class _GradientReversal(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, strength: float) -> torch.Tensor:
+        ctx.strength = float(strength)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return -ctx.strength * grad_output, None
+
+
+def _gradient_reverse(x: torch.Tensor, strength: float) -> torch.Tensor:
+    return _GradientReversal.apply(x, float(strength))
+
+
+def _balanced_accuracy(logits: torch.Tensor, target: torch.Tensor, num_actions: int) -> torch.Tensor:
+    pred = logits.argmax(dim=-1)
+    recalls = []
+    for action_idx in range(int(num_actions)):
+        mask = target == action_idx
+        if torch.any(mask):
+            recalls.append((pred[mask] == target[mask]).float().mean())
+    return torch.stack(recalls).mean() if recalls else logits.new_zeros(())
+
+class LatentResidualEncoder(nn.Module):
+    def __init__(
+        self,
+        *,
+        input_length: int,
+        pred_length: int,
+        num_nodes: int,
+        action_embed_dim: int,
+        hidden_dim: int,
+        latent_dim: int,
+    ) -> None:
+        super().__init__()
+        feature_dim = int(num_nodes) * 3
+        hidden_dim = max(8, int(hidden_dim))
+        latent_dim = int(latent_dim)
+        self.input_length = int(input_length)
+        self.pred_length = int(pred_length)
+        self.num_nodes = int(num_nodes)
+        self.hidden_dim = hidden_dim
+        # Preserve temporal order. The old implementation averaged over time,
+        # making approach/grasp/withdrawal phases indistinguishable.
+        self.history_encoder = nn.GRU(feature_dim, hidden_dim, batch_first=True)
+        self.coarse_encoder = nn.GRU(feature_dim, hidden_dim, batch_first=True)
+        self.residual_encoder = nn.GRU(feature_dim, hidden_dim, batch_first=True)
+        self.context_net = nn.Sequential(
+            nn.LayerNorm(hidden_dim * 2 + int(action_embed_dim)),
+            nn.Linear(hidden_dim * 2 + int(action_embed_dim), hidden_dim),
+            nn.GELU(),
+        )
+        self.posterior_net = nn.Sequential(
+            nn.LayerNorm(hidden_dim * 2),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+        )
+        self.to_mu = nn.Linear(hidden_dim, latent_dim)
+        self.to_logvar = nn.Linear(hidden_dim, latent_dim)
+
+    def encode_context(
+        self,
+        history: torch.Tensor,
+        coarse_future: torch.Tensor,
+        action_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        B = history.size(0)
+        _assert_shape(history, (B, self.input_length, self.num_nodes, 3), "latent_history")
+        _assert_shape(coarse_future, (B, self.pred_length, self.num_nodes, 3), "latent_coarse")
+        if action_emb.ndim != 2 or int(action_emb.shape[0]) != B:
+            raise ValueError(
+                f"action_emb must be (B, D), got {tuple(action_emb.shape)} for batch {B}"
+            )
+        history_seq = history.reshape(B, self.input_length, -1)
+        coarse_seq = coarse_future.reshape(B, self.pred_length, -1)
+        _, history_hidden = self.history_encoder(history_seq)
+        _, coarse_hidden = self.coarse_encoder(coarse_seq)
+        return self.context_net(torch.cat([history_hidden[-1], coarse_hidden[-1], action_emb], dim=-1))
+
+    def forward(
+        self,
+        residual: torch.Tensor,
+        history: torch.Tensor,
+        coarse_future: torch.Tensor,
+        action_emb: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        context = self.encode_context(history, coarse_future, action_emb)
+        return self.encode_posterior(residual, context)
+
+    def encode_posterior(
+        self,
+        residual: torch.Tensor,
+        context: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        B = residual.size(0)
+        _assert_shape(residual, (B, self.pred_length, self.num_nodes, 3), "latent_residual")
+        _assert_shape(context, (B, self.hidden_dim), "latent_context")
+        residual_seq = residual.reshape(B, self.pred_length, -1)
+        _, residual_hidden = self.residual_encoder(residual_seq)
+        h = self.posterior_net(torch.cat([context, residual_hidden[-1]], dim=-1))
+        return self.to_mu(h), self.to_logvar(h)
+
+
+class ContextGaussianPrior(nn.Module):
+    """A per-observation prior p(z | history, coarse future, action)."""
+
+    def __init__(self, context_dim: int, latent_dim: int) -> None:
+        super().__init__()
+        self.latent_dim = int(latent_dim)
+        self.to_mu = nn.Linear(int(context_dim), self.latent_dim)
+        self.to_logvar = nn.Linear(int(context_dim), self.latent_dim)
+        # Begin close to N(0, I), then learn context-dependent modes.
+        nn.init.zeros_(self.to_mu.weight)
+        nn.init.zeros_(self.to_mu.bias)
+        nn.init.zeros_(self.to_logvar.weight)
+        nn.init.zeros_(self.to_logvar.bias)
+
+    def forward(self, context: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.to_mu(context), self.to_logvar(context)
+
+
+def _reparameterize(
+    mu: torch.Tensor,
+    logvar: torch.Tensor,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    if generator is None:
+        eps = torch.randn_like(mu)
+    else:
+        eps = torch.randn(mu.shape, device=mu.device, dtype=mu.dtype, generator=generator)
+    return mu + torch.exp(0.5 * logvar) * eps
+
+
+def _kl_diag_gaussians(
+    posterior_mu: torch.Tensor,
+    posterior_logvar: torch.Tensor,
+    prior_mu: torch.Tensor,
+    prior_logvar: torch.Tensor,
+) -> torch.Tensor:
+    prior_var = torch.exp(prior_logvar)
+    posterior_var = torch.exp(posterior_logvar)
+    kl = 0.5 * (
+        prior_logvar
+        - posterior_logvar
+        + (posterior_var + (posterior_mu - prior_mu).pow(2)) / torch.clamp(prior_var, min=1e-8)
+        - 1.0
+    )
+    return kl.sum(dim=-1).mean()
 
 
 # ----------------------------- Diffusion scheduler ----------------------------
@@ -584,6 +751,8 @@ class MRTimeTransformerDenoiser(nn.Module):
         cond_use_history: bool = True,
         cond_use_coarse: bool = True,
         allow_no_conditioning: bool = False,
+        latent_dim: int = 0,
+        latent_conditioning_mode: str = "add",
     ) -> None:
         super().__init__()
         self.in_feat = int(in_feat)
@@ -593,6 +762,13 @@ class MRTimeTransformerDenoiser(nn.Module):
         self.cond_use_history = bool(cond_use_history)
         self.cond_use_coarse = bool(cond_use_coarse)
         self.allow_no_conditioning = bool(allow_no_conditioning)
+        self.latent_dim = int(latent_dim)
+        self.latent_conditioning_mode = str(latent_conditioning_mode).lower()
+        if self.latent_dim > 0 and self.latent_conditioning_mode != "add":
+            raise ValueError(
+                "Only latent_conditioning_mode='add' is implemented. "
+                f"Got {latent_conditioning_mode!r}."
+            )
 
         if self.in_feat % 3 != 0:
             raise ValueError(f"in_feat must be divisible by 3, got {self.in_feat}")
@@ -614,6 +790,14 @@ class MRTimeTransformerDenoiser(nn.Module):
             nn.SiLU(),
             nn.Linear(d_model, d_model),
         )
+        self.latent_proj = nn.Sequential(
+            nn.Linear(self.latent_dim, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model),
+        ) if self.latent_dim > 0 else None
+        # A zero-initialized residual gate makes enabling the latent path begin
+        # exactly at the non-latent denoiser instead of perturbing every FiLM block.
+        self.latent_gate = nn.Parameter(torch.zeros(())) if self.latent_dim > 0 else None
 
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -681,6 +865,7 @@ class MRTimeTransformerDenoiser(nn.Module):
         history: torch.Tensor,        # (B, T_in, F)
         coarse_future: torch.Tensor,  # (B, T_out, F)
         mamp_feat: Optional[torch.Tensor] = None,
+        latent_z: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B = x_noisy.size(0)
         _assert_shape(x_noisy, (B, self.t_out, self.in_feat), "x_noisy")
@@ -717,6 +902,15 @@ class MRTimeTransformerDenoiser(nn.Module):
 
         te = _timestep_embedding(timesteps, self.d_model).to(dtype=x.dtype, device=x.device)
         te = self.t_embed(te)
+        if self.latent_proj is not None:
+            if latent_z is None:
+                raise ValueError("latent_z is required when latent variability is enabled.")
+            _assert_shape(latent_z, (B, self.latent_dim), "latent_z")
+            te = te + torch.tanh(self.latent_gate) * self.latent_proj(
+                latent_z.to(device=x.device, dtype=x.dtype)
+            )
+        elif latent_z is not None:
+            raise ValueError("latent_z was provided but this denoiser was built without latent conditioning.")
 
         for block in self.blocks:
             x = block(x, memory, te)
@@ -1150,6 +1344,8 @@ class TimeResidualConditionalDiffusion(nn.Module):
             cond_use_history=cfg.cond_use_history,
             cond_use_coarse=cfg.cond_use_coarse,
             allow_no_conditioning=cfg.allow_no_conditioning,
+            latent_dim=cfg.latent_dim if cfg.use_latent_variability else 0,
+            latent_conditioning_mode=cfg.latent_conditioning_mode,
         )
 
     def _current_bucket_variances(self) -> Optional[torch.Tensor]:
@@ -1340,6 +1536,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
         history_full: torch.Tensor,
         coarse_future_full: torch.Tensor,
         mamp_feat: Optional[torch.Tensor] = None,
+        latent_z: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B = residual_gt.size(0)
         _assert_shape(residual_gt, (B, self.cfg.pred_length, self.cfg.num_nodes, 3), "residual_gt")
@@ -1373,6 +1570,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
             history_free,
             coarse_free,
             mamp_feat=mamp_feat,
+            latent_z=latent_z,
         ).float()
 
         err = v_hat - v
@@ -1389,6 +1587,8 @@ class TimeResidualConditionalDiffusion(nn.Module):
         steps: Optional[int] = None,
         eta: float = 0.0,
         return_score: bool = False,
+        latent_z: Optional[torch.Tensor] = None,
+        initial_noise: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if steps is None:
             steps = self.cfg.ddim_steps
@@ -1410,10 +1610,18 @@ class TimeResidualConditionalDiffusion(nn.Module):
         t_seq = _make_ddim_timesteps(T, steps, device=device)
         clip = float(self.cfg.x0_clip)
         score = torch.zeros(B, device=device, dtype=torch.float32) if return_score else None
-        x = torch.randn(
-            (B, self.cfg.pred_length, self.free_feature_dim),
-            device=device, dtype=torch.float32, generator=gen,
-        )
+        if initial_noise is None:
+            x = torch.randn(
+                (B, self.cfg.pred_length, self.free_feature_dim),
+                device=device, dtype=torch.float32, generator=gen,
+            )
+        else:
+            _assert_shape(
+                initial_noise,
+                (B, self.cfg.pred_length, self.free_feature_dim),
+                "initial_noise",
+            )
+            x = initial_noise.to(device=device, dtype=torch.float32)
         spectral_state = self._dynamic_spectral_state(history_free=history_free)
         alpha_init, _, sqrt_omb_init = self._spectral_schedule_rows(
             torch.full((B,), int(t_seq[0].item()), device=device, dtype=torch.long),
@@ -1430,7 +1638,7 @@ class TimeResidualConditionalDiffusion(nn.Module):
             x_input = x.to(dtype=history_free.dtype)
 
             v_hat = self.denoiser(
-                x_input, t_batch, history_free, coarse_free, mamp_feat=mamp_feat,
+                x_input, t_batch, history_free, coarse_free, mamp_feat=mamp_feat, latent_z=latent_z,
             ).float()
             _, sqrt_alpha_bars_t, sqrt_one_minus_alpha_bars_t = self._spectral_schedule_rows(
                 t_batch,
@@ -1499,9 +1707,251 @@ class CardForecaster(nn.Module):
         self.cfg = cfg
         self.coarse = CoarseDCTForecaster(cfg)
         self.diffusion = TimeResidualConditionalDiffusion(cfg, metadata=metadata)
+        self.use_latent_variability = bool(cfg.use_latent_variability)
+        self.explainable_latent_decomposition = bool(cfg.explainable_latent_decomposition)
+        if self.use_latent_variability:
+            if int(cfg.latent_dim) <= 0:
+                raise ValueError(f"latent_dim must be positive, got {cfg.latent_dim}")
+            if int(cfg.num_actions) <= 0:
+                raise ValueError(f"num_actions must be positive, got {cfg.num_actions}")
+            action_embed_dim = int(cfg.latent_dim)
+            self.action_embedding = nn.Embedding(int(cfg.num_actions), action_embed_dim)
+            self.latent_encoder = LatentResidualEncoder(
+                input_length=cfg.input_length,
+                pred_length=cfg.pred_length,
+                num_nodes=cfg.num_nodes,
+                action_embed_dim=action_embed_dim,
+                hidden_dim=cfg.latent_encoder_hidden_dim,
+                latent_dim=cfg.latent_dim,
+            )
+            if self.explainable_latent_decomposition:
+                dims = (
+                    int(cfg.latent_action_dim),
+                    int(cfg.latent_style_dim),
+                    int(cfg.latent_residual_dim),
+                )
+                if any(dim <= 0 for dim in dims) or sum(dims) != int(cfg.latent_dim):
+                    raise ValueError(
+                        "Explainable latent dimensions must be positive and sum to latent_dim; "
+                        f"got action/style/residual={dims}, latent_dim={cfg.latent_dim}."
+                    )
+                structured_dim = dims[0] + dims[1]
+            else:
+                structured_dim = int(cfg.latent_dim)
+            self.action_prior = ContextGaussianPrior(cfg.latent_encoder_hidden_dim, structured_dim)
+            if self.explainable_latent_decomposition:
+                self.action_classifier = nn.Sequential(
+                    nn.LayerNorm(int(cfg.latent_action_dim)),
+                    nn.Linear(int(cfg.latent_action_dim), cfg.latent_encoder_hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(cfg.latent_encoder_hidden_dim, int(cfg.num_actions)),
+                )
+                non_action_dim = int(cfg.latent_style_dim) + int(cfg.latent_residual_dim)
+                self.adversarial_classifier = nn.Sequential(
+                    nn.LayerNorm(non_action_dim),
+                    nn.Linear(non_action_dim, cfg.latent_encoder_hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(cfg.latent_encoder_hidden_dim, int(cfg.num_actions)),
+                )
+                raw_weights = (metadata or {}).get("action_class_weights")
+                if raw_weights is None:
+                    class_weights = torch.ones(int(cfg.num_actions), dtype=torch.float32)
+                else:
+                    class_weights = torch.as_tensor(raw_weights, dtype=torch.float32).view(-1)
+                    if int(class_weights.numel()) != int(cfg.num_actions):
+                        raise ValueError(
+                            "action_class_weights length must equal num_actions, "
+                            f"got {class_weights.numel()} and {cfg.num_actions}."
+                        )
+                self.register_buffer("action_class_weights", class_weights, persistent=True)
+            else:
+                self.action_classifier = None
+                self.adversarial_classifier = None
+                self.register_buffer("action_class_weights", torch.ones(1), persistent=False)
+        else:
+            self.action_embedding = None
+            self.latent_encoder = None
+            self.action_prior = None
+            self.action_classifier = None
+            self.adversarial_classifier = None
+            self.register_buffer("action_class_weights", torch.ones(1), persistent=False)
         if cfg.freeze_coarse:
             for p in self.coarse.parameters():
                 p.requires_grad = False
+
+    def _require_action_id(self, action_id: Optional[torch.Tensor], batch_size: int, device: torch.device) -> torch.Tensor:
+        if action_id is None:
+            raise ValueError(
+                "action_id is required when card_use_latent_variability=true. "
+                "Ensure the dataset returns aux['action_id']."
+            )
+        action_id = action_id.to(device=device, dtype=torch.long).view(-1)
+        if int(action_id.numel()) != int(batch_size):
+            raise ValueError(f"action_id batch mismatch: expected {batch_size}, got {action_id.numel()}")
+        if torch.any(action_id < 0) or torch.any(action_id >= int(self.cfg.num_actions)):
+            raise ValueError(
+                f"action_id values must be in [0, {int(self.cfg.num_actions) - 1}], "
+                f"got min={int(action_id.min().item())} max={int(action_id.max().item())}"
+            )
+        return action_id
+
+    @property
+    def latent_slices(self) -> Dict[str, slice]:
+        if not self.explainable_latent_decomposition:
+            return {"latent": slice(0, int(self.cfg.latent_dim))}
+        action_end = int(self.cfg.latent_action_dim)
+        style_end = action_end + int(self.cfg.latent_style_dim)
+        return {
+            "action": slice(0, action_end),
+            "style": slice(action_end, style_end),
+            "residual": slice(style_end, int(self.cfg.latent_dim)),
+        }
+
+    def split_latent(self, latent: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Return named views of a full latent tensor's final dimension."""
+        if int(latent.shape[-1]) != int(self.cfg.latent_dim):
+            raise ValueError(
+                f"Expected latent final dimension {self.cfg.latent_dim}, got {latent.shape[-1]}."
+            )
+        return {name: latent[..., component] for name, component in self.latent_slices.items()}
+
+    def _pack_latent_blocks(
+        self,
+        latent: torch.Tensor,
+        mean: torch.Tensor,
+        logvar: torch.Tensor,
+    ) -> Dict[str, Dict[str, torch.Tensor]]:
+        latent_blocks = self.split_latent(latent)
+        mean_blocks = self.split_latent(mean)
+        logvar_blocks = self.split_latent(logvar)
+        return {
+            name: {
+                "z": latent_blocks[name],
+                "mu": mean_blocks[name],
+                "logvar": logvar_blocks[name],
+            }
+            for name in self.latent_slices
+        }
+
+    def _posterior_latent(
+        self,
+        *,
+        residual_gt: torch.Tensor,
+        history: torch.Tensor,
+        coarse_future: torch.Tensor,
+        action_id: torch.Tensor,
+        grl_strength: float = 0.0,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if self.action_embedding is None or self.latent_encoder is None or self.action_prior is None:
+            raise RuntimeError("Latent modules are not initialized.")
+        action_emb = self.action_embedding(action_id)
+        context = self.latent_encoder.encode_context(history, coarse_future, action_emb)
+        posterior_mu, posterior_logvar = self.latent_encoder.encode_posterior(residual_gt, context)
+        structured_mu, structured_logvar = self.action_prior(context)
+        if self.explainable_latent_decomposition:
+            residual_dim = int(self.cfg.latent_residual_dim)
+            prior_mu = torch.cat([structured_mu, structured_mu.new_zeros(action_id.size(0), residual_dim)], dim=-1)
+            prior_logvar = torch.cat([
+                structured_logvar,
+                structured_logvar.new_zeros(action_id.size(0), residual_dim),
+            ], dim=-1)
+        else:
+            prior_mu, prior_logvar = structured_mu, structured_logvar
+        z = _reparameterize(posterior_mu, posterior_logvar)
+        metrics = {
+            "posterior_mu": posterior_mu,
+            "posterior_logvar": posterior_logvar,
+            "prior_mu": prior_mu,
+            "prior_logvar": prior_logvar,
+            "z": z,
+        }
+        if self.explainable_latent_decomposition:
+            slices = self.latent_slices
+            structured_slice = slice(0, slices["style"].stop)
+            kl_structured = _kl_diag_gaussians(
+                posterior_mu[:, structured_slice], posterior_logvar[:, structured_slice],
+                prior_mu[:, structured_slice], prior_logvar[:, structured_slice],
+            )
+            residual_slice = slices["residual"]
+            zeros_mu = posterior_mu[:, residual_slice].new_zeros(posterior_mu[:, residual_slice].shape)
+            zeros_logvar = posterior_logvar[:, residual_slice].new_zeros(posterior_logvar[:, residual_slice].shape)
+            kl_residual = _kl_diag_gaussians(
+                posterior_mu[:, residual_slice], posterior_logvar[:, residual_slice],
+                zeros_mu, zeros_logvar,
+            )
+            action_logits = self.action_classifier(z[:, slices["action"]])
+            non_action = torch.cat([z[:, slices["style"]], z[:, slices["residual"]]], dim=-1)
+            adversarial_logits = self.adversarial_classifier(
+                _gradient_reverse(non_action, grl_strength)
+            )
+            class_weights = self.action_class_weights.to(device=z.device, dtype=z.dtype)
+            metrics.update({
+                "kl_structured": kl_structured,
+                "kl_residual": kl_residual,
+                "kl_loss": kl_structured + kl_residual,
+                "action_loss": F.cross_entropy(action_logits, action_id, weight=class_weights),
+                "adversarial_loss": F.cross_entropy(adversarial_logits, action_id, weight=class_weights),
+                "action_balanced_accuracy": _balanced_accuracy(
+                    action_logits.detach(), action_id, int(self.cfg.num_actions)
+                ),
+                "adversarial_balanced_accuracy": _balanced_accuracy(
+                    adversarial_logits.detach(), action_id, int(self.cfg.num_actions)
+                ),
+            })
+        else:
+            metrics["kl_loss"] = _kl_diag_gaussians(
+                posterior_mu, posterior_logvar, prior_mu, prior_logvar
+            )
+        return z, metrics
+
+    def _prior_latent(
+        self,
+        *,
+        history: torch.Tensor,
+        coarse_future: torch.Tensor,
+        action_id: torch.Tensor,
+        generator: Optional[torch.Generator] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.action_prior is None or self.action_embedding is None or self.latent_encoder is None:
+            raise RuntimeError("Action prior is not initialized.")
+        action_emb = self.action_embedding(action_id)
+        context = self.latent_encoder.encode_context(history, coarse_future, action_emb)
+        structured_mu, structured_logvar = self.action_prior(context)
+        if self.explainable_latent_decomposition:
+            residual_dim = int(self.cfg.latent_residual_dim)
+            prior_mu = torch.cat([structured_mu, structured_mu.new_zeros(action_id.size(0), residual_dim)], dim=-1)
+            prior_logvar = torch.cat([
+                structured_logvar,
+                structured_logvar.new_zeros(action_id.size(0), residual_dim),
+            ], dim=-1)
+        else:
+            prior_mu, prior_logvar = structured_mu, structured_logvar
+        z = _reparameterize(prior_mu, prior_logvar, generator=generator)
+        return z, prior_mu, prior_logvar
+
+    def posterior_latent_blocks(
+        self,
+        *,
+        residual_gt: torch.Tensor,
+        history: torch.Tensor,
+        coarse_future: torch.Tensor,
+        action_id: torch.Tensor,
+        grl_strength: float = 0.0,
+    ) -> Dict[str, Dict[str, torch.Tensor]]:
+        """Encode a posterior sample and return its named latent blocks."""
+        action_id_t = self._require_action_id(action_id, history.size(0), history.device)
+        latent, metrics = self._posterior_latent(
+            residual_gt=residual_gt,
+            history=history,
+            coarse_future=coarse_future,
+            action_id=action_id_t,
+            grl_strength=grl_strength,
+        )
+        return self._pack_latent_blocks(
+            latent,
+            metrics["posterior_mu"],
+            metrics["posterior_logvar"],
+        )
 
     def _zero_coarse_future(self, history: torch.Tensor) -> torch.Tensor:
         _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
@@ -1521,6 +1971,11 @@ class CardForecaster(nn.Module):
         mamp_feat: Optional[torch.Tensor] = None,
         coarse_future: Optional[torch.Tensor] = None,
         allow_coarse_grad: bool = False,
+        action_id: Optional[torch.Tensor] = None,
+        beta_kl_current: Optional[float] = None,
+        return_metrics: bool = False,
+        disable_latent: bool = False,
+        grl_strength: float = 0.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
         _assert_shape(future_gt, (None, self.cfg.pred_length, self.cfg.num_nodes, 3), "future_gt")
@@ -1542,13 +1997,157 @@ class CardForecaster(nn.Module):
             coarse_cond = coarse_future.detach() if self.cfg.stopgrad_coarse_condition else coarse_future
             residual_gt = future_gt - coarse_future.detach()
 
-        loss = self.diffusion.training_loss(
+        latent_z = None
+        latent_metrics: Dict[str, torch.Tensor] = {}
+        latent_active = self.use_latent_variability and not bool(disable_latent)
+        if latent_active:
+            action_id_t = self._require_action_id(action_id, history.size(0), history.device)
+            latent_z, latent_metrics = self._posterior_latent(
+                residual_gt=residual_gt.detach() if not allow_coarse_grad else residual_gt,
+                history=history,
+                coarse_future=coarse_cond,
+                action_id=action_id_t,
+                grl_strength=grl_strength,
+            )
+        elif self.use_latent_variability:
+            # Baseline-pretraining stage: the denoiser was constructed with a
+            # latent input, but receives a neutral value while the zero gate and
+            # all latent parameters remain frozen.
+            latent_z = torch.zeros(
+                history.size(0),
+                int(self.cfg.latent_dim),
+                device=history.device,
+                dtype=history.dtype,
+            )
+
+        diffusion_loss = self.diffusion.training_loss(
             residual_gt=residual_gt,
             history_full=history,
             coarse_future_full=coarse_cond,
             mamp_feat=mamp_feat,
+            latent_z=latent_z,
         )
+        loss = diffusion_loss
+        metrics: Dict[str, torch.Tensor] = {"diffusion_loss": diffusion_loss.detach()}
+        if latent_active:
+            kl_loss = latent_metrics["kl_loss"]
+            beta = float(self.cfg.beta_kl if beta_kl_current is None else beta_kl_current)
+            loss = diffusion_loss + beta * kl_loss
+            if self.explainable_latent_decomposition and int(self.cfg.num_actions) > 1:
+                loss = (
+                    loss
+                    + float(self.cfg.beta_action) * latent_metrics["action_loss"]
+                    + float(self.cfg.beta_adversarial) * latent_metrics["adversarial_loss"]
+                )
+            metrics.update({
+                "kl_loss": kl_loss.detach(),
+                "beta_kl_current": torch.tensor(beta, device=history.device, dtype=diffusion_loss.dtype),
+                "total_loss": loss.detach(),
+                "posterior_mu_abs": latent_metrics["posterior_mu"].detach().abs().mean(),
+                "posterior_std": torch.exp(0.5 * latent_metrics["posterior_logvar"].detach()).mean(),
+                "prior_mu_abs": latent_metrics["prior_mu"].detach().abs().mean(),
+                "prior_std": torch.exp(0.5 * latent_metrics["prior_logvar"].detach()).mean(),
+                "latent_gate": torch.tanh(self.diffusion.denoiser.latent_gate.detach()),
+            })
+            if self.explainable_latent_decomposition:
+                metrics.update({
+                    "kl_structured": latent_metrics["kl_structured"].detach(),
+                    "kl_residual": latent_metrics["kl_residual"].detach(),
+                    "action_loss": latent_metrics["action_loss"].detach(),
+                    "adversarial_loss": latent_metrics["adversarial_loss"].detach(),
+                    "action_balanced_accuracy": latent_metrics["action_balanced_accuracy"],
+                    "adversarial_balanced_accuracy": latent_metrics["adversarial_balanced_accuracy"],
+                    "grl_strength": torch.tensor(
+                        float(grl_strength), device=history.device, dtype=diffusion_loss.dtype
+                    ),
+                    "total_loss": loss.detach(),
+                })
+                for factor_name, component in self.latent_slices.items():
+                    posterior_mu = latent_metrics["posterior_mu"][:, component].detach()
+                    posterior_logvar = latent_metrics["posterior_logvar"][:, component].detach()
+                    prior_mu = latent_metrics["prior_mu"][:, component].detach()
+                    prior_logvar = latent_metrics["prior_logvar"][:, component].detach()
+                    metrics.update({
+                        f"{factor_name}_posterior_mu_abs": posterior_mu.abs().mean(),
+                        f"{factor_name}_posterior_std": torch.exp(0.5 * posterior_logvar).mean(),
+                        f"{factor_name}_prior_mu_abs": prior_mu.abs().mean(),
+                        f"{factor_name}_prior_std": torch.exp(0.5 * prior_logvar).mean(),
+                    })
+        if return_metrics:
+            return loss, coarse_future, metrics
         return loss, coarse_future
+
+    @torch.no_grad()
+    def sample_prior_latent(
+        self,
+        history: torch.Tensor,
+        *,
+        action_id: torch.Tensor,
+        coarse_future: Optional[torch.Tensor] = None,
+        seed: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.use_latent_variability:
+            raise RuntimeError("Latent variability is disabled.")
+        if coarse_future is None:
+            coarse_future = self._zero_coarse_future(history) if self.cfg.diffusion_only else self.coarse(history)
+        action_id_t = self._require_action_id(action_id, history.size(0), history.device)
+        gen = torch.Generator(device=history.device)
+        gen.manual_seed(int(seed) + 9176)
+        return self._prior_latent(
+            history=history,
+            coarse_future=coarse_future,
+            action_id=action_id_t,
+            generator=gen,
+        )
+
+    @torch.no_grad()
+    def prior_latent_blocks(
+        self,
+        history: torch.Tensor,
+        *,
+        action_id: torch.Tensor,
+        coarse_future: Optional[torch.Tensor] = None,
+        seed: int = 0,
+    ) -> Dict[str, Dict[str, torch.Tensor]]:
+        """Sample the conditional prior and return its named latent blocks."""
+        latent, mean, logvar = self.sample_prior_latent(
+            history,
+            action_id=action_id,
+            coarse_future=coarse_future,
+            seed=seed,
+        )
+        return self._pack_latent_blocks(latent, mean, logvar)
+
+    @torch.no_grad()
+    def predict_with_latent(
+        self,
+        history: torch.Tensor,
+        latent_z: torch.Tensor,
+        *,
+        coarse_future: Optional[torch.Tensor] = None,
+        mamp_feat: Optional[torch.Tensor] = None,
+        seed: int = 0,
+        steps: Optional[int] = None,
+        initial_noise: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
+        _assert_shape(latent_z, (history.size(0), int(self.cfg.latent_dim)), "latent_z")
+        if coarse_future is None:
+            coarse_future = self._zero_coarse_future(history) if self.cfg.diffusion_only else self.coarse(history)
+        residual = self.diffusion.sample_ddim(
+            history_full=history,
+            coarse_future_full=coarse_future,
+            mamp_feat=mamp_feat,
+            seed=seed,
+            steps=self.cfg.ddim_steps if steps is None else int(steps),
+            eta=0.0,
+            latent_z=latent_z,
+            initial_noise=initial_noise,
+        )
+        future = coarse_future + residual
+        if 0 <= int(self.diffusion.wrist_index) < self.cfg.num_nodes:
+            future[:, :, int(self.diffusion.wrist_index), :] = 0.0
+        return future
 
     @torch.no_grad()
     def predict(
@@ -1559,6 +2158,7 @@ class CardForecaster(nn.Module):
         deterministic: bool = True,
         seed: int = 0,
         return_score: bool = False,
+        action_id: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         _assert_shape(history, (None, self.cfg.input_length, self.cfg.num_nodes, 3), "history")
         if self.cfg.diffusion_only:
@@ -1573,6 +2173,17 @@ class CardForecaster(nn.Module):
             )
 
         coarse_cond = coarse_future.detach() if self.cfg.stopgrad_coarse_condition else coarse_future
+        latent_z = None
+        if self.use_latent_variability:
+            action_id_t = self._require_action_id(action_id, history.size(0), history.device)
+            gen = torch.Generator(device=history.device)
+            gen.manual_seed(int(seed) + 9176)
+            latent_z, _prior_mu, _prior_logvar = self._prior_latent(
+                history=history,
+                coarse_future=coarse_cond,
+                action_id=action_id_t,
+                generator=gen,
+            )
         residual_pred = self.diffusion.sample_ddim(
             history_full=history,
             coarse_future_full=coarse_cond,
@@ -1581,6 +2192,7 @@ class CardForecaster(nn.Module):
             steps=self.cfg.ddim_steps,
             eta=0.0 if deterministic else 1.0,
             return_score=return_score,
+            latent_z=latent_z,
         )
 
         if return_score:

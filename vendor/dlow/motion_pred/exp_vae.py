@@ -20,6 +20,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 from common.evaluation import save_eval_samples_npz
 from common.metrics import humanmac_metrics, splineeqnet_diffusion_batch_eval
+from common.model_profiling import profile_once
 
 
 def loss_function(X, Y_r, Y, mu, logvar):
@@ -68,20 +69,47 @@ def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
     hm_pred_batches = []
     hm_gt_batches = []
     hm_context_batches = []
+    hm_sequence_batches = []
     saved_obs = []
     saved_tgt = []
     saved_pred = []
     saved_pred_all = []
 
-    data_gen = eval_dataset.iter_generator_with_scale()
+    has_sequence_ids = hasattr(eval_dataset, 'iter_generator_with_scale_and_sequence_id')
+    data_gen = (
+        eval_dataset.iter_generator_with_scale_and_sequence_id()
+        if has_sequence_ids else eval_dataset.iter_generator_with_scale()
+    )
     num_samples = 0
-    for data, norm_factor in data_gen:
+    for item in data_gen:
+        data, norm_factor = item[:2]
+        sequence_id = item[2] if len(item) > 2 else None
         num_samples += 1
         traj_np = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)
         traj = tensor(traj_np, device=device, dtype=dtype).permute(1, 0, 2).contiguous()
 
         X = traj[:t_his]
         X_rep = X.repeat((1, eval_sample_num, 1))
+
+        def _profile_cvae_sampling():
+            profile_x = X[:, :1].repeat((1, eval_sample_num, 1))
+            if eval_sample_num == 1:
+                profile_z = torch.zeros(
+                    (profile_x.shape[1], nz), device=device, dtype=dtype
+                )
+                return model.sample_prior(profile_x, z=profile_z)
+            return model.sample_prior(profile_x)
+
+        profile_once(
+            key="dlow_cvae_sampling",
+            model_name="dlow_cvae",
+            modules=[model],
+            sample_fn=_profile_cvae_sampling,
+            sampling_steps=1,
+            batch_size=1,
+            num_candidates=eval_sample_num,
+            notes="Single-pass CVAE prior sampling used by the orchestrator",
+        )
         if eval_sample_num == 1:
             z = torch.zeros((X_rep.shape[1], nz), device=device, dtype=dtype)
             Y = model.sample_prior(X_rep, z=z)
@@ -103,6 +131,8 @@ def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
         hm_pred_batches.append(pred.permute(1, 0, 2, 3).contiguous().to(dtype=torch.float32).detach().cpu())
         hm_gt_batches.append(gt.to(dtype=torch.float32).detach().cpu())
         hm_context_batches.append(conditioning_context.to(dtype=torch.float32).detach().cpu())
+        if sequence_id is not None:
+            hm_sequence_batches.append(torch.tensor([sequence_id], dtype=torch.long))
         pred_first_all = pred[0].reshape(eval_sample_num, t_pred, -1, 3)
         gt_first = gt[0].reshape(t_pred, -1, 3)
         obs_first = conditioning_context[0]
@@ -120,6 +150,8 @@ def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
         gt_future=torch.cat(hm_gt_batches, dim=0),
         conditioning_context=torch.cat(hm_context_batches, dim=0),
         threshold=float(multimodal_threshold),
+        sequence_ids=(torch.cat(hm_sequence_batches, dim=0)
+                      if hm_sequence_batches else None),
     )
     for k in ('APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID'):
         stats_meter[k].update(float(hm[k]))

@@ -213,7 +213,17 @@ class AssemblyDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        obs7, pred7, norm_factor = self.dataset[idx]
+        sample = self.dataset[idx]
+        if not isinstance(sample, (tuple, list)) or len(sample) < 3:
+            raise ValueError(
+                "Shared Assembly dataset must return at least "
+                "(observation, prediction, norm_factor)."
+            )
+        # The shared dataset now appends an auxiliary-metadata mapping as its
+        # fourth value. SkeletonDiffusion owns the metadata format it returns
+        # below, so consume the first three values and leave the shared aux
+        # payload untouched.
+        obs7, pred7, norm_factor = sample[:3]
         obs = obs7[..., 4:].to(dtype=torch.float32)
         pred = pred7[..., 4:].to(dtype=torch.float32)
 

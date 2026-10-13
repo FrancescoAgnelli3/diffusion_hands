@@ -9,4 +9,5 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="$(command -v python3)"
 fi
 
+cd "$ROOT_DIR"
 DIFFUSION_HANDS_PYTHON="$PYTHON_BIN" "$PYTHON_BIN" "$ROOT_DIR/tools/run_all_models.py" --config "$CONFIG_PATH"

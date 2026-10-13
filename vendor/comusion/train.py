@@ -23,6 +23,7 @@ from data_utils.transforms import calculate_stats, load_stats
 from data_utils.dataset_assembly import build_assembly_train_val
 from data_utils.transforms import DataAugmentation
 from common.evaluation import save_eval_samples_npz
+from common.model_profiling import profile_once
 
 
 def generate_assembly_loss_weights(t_length, scale=10):
@@ -73,6 +74,36 @@ def generate_loss_weight(cfg):
     return loss_weights
 
 
+def append_per_action_metrics(path, *, cfg, by_action):
+    if not path or not by_action:
+        return
+    fields = [
+        'timestamp', 'dataset', 'split', 'action', 'model', 'samples',
+        'APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID',
+    ]
+    output_path = Path(str(path))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not output_path.exists() or output_path.stat().st_size == 0
+    with output_path.open('a', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if write_header:
+            writer.writeheader()
+        for action_name in sorted(by_action):
+            action_metrics = by_action[action_name]
+            writer.writerow({
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'dataset': str(getattr(cfg, 'dataset', 'assembly')),
+                'split': 'test',
+                'action': action_name,
+                'model': str(getattr(cfg, 'result_model_name', 'comusion')),
+                'samples': int(action_metrics.get('samples', 0)),
+                **{
+                    key: float(action_metrics.get(key, float('nan')))
+                    for key in ('APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID')
+                },
+            })
+
+
 class Trainer(object):
     def __init__(
         self,
@@ -97,6 +128,7 @@ class Trainer(object):
         self.dtype = torch.float32 if self.cfg.dtype == 'float32' else torch.float64
         self.is_assembly = self.cfg.dataset in {'assembly', 'h2o', 'bighands', 'fpha'}
         self.drop_root_joint = not self.is_assembly
+        self.per_action_stats = {}
         
         # dataset and dataloader initialization
         if self.is_assembly:
@@ -182,8 +214,21 @@ class Trainer(object):
             inp, out, norm_factor = batch[:3]
             traj_np = torch.cat((inp[:, :, :, 4:], out[:, :, :, 4:]), dim=1)
             extra = {
-                'act': torch.zeros(inp.shape[0], dtype=torch.int64),
+                'act': (
+                    batch[3]['action_id'].to(dtype=torch.int64).view(-1)
+                    if len(batch) > 3
+                    and isinstance(batch[3], dict)
+                    and torch.is_tensor(batch[3].get('action_id'))
+                    else torch.zeros(inp.shape[0], dtype=torch.int64)
+                ),
                 'norm_factor': norm_factor,
+                'sequence_id': (
+                    batch[3]['sequence_id'].to(dtype=torch.int64).view(-1)
+                    if len(batch) > 3
+                    and isinstance(batch[3], dict)
+                    and torch.is_tensor(batch[3].get('sequence_id'))
+                    else torch.arange(inp.shape[0], dtype=torch.int64)
+                ),
             }
             return traj_np, extra
 
@@ -271,6 +316,24 @@ class Trainer(object):
         # process x_0_history: [b*sample_num, t_pred, nc]
         x_0_history = torch.repeat_interleave(traj[:,:-self.output_n,:], sample_num, dim=0)
         total_sample_num = x_0_history.shape[0]
+        profile_history = torch.repeat_interleave(
+            traj[:1, :-self.output_n, :], sample_num, dim=0
+        )
+        profile_once(
+            key="comusion_sampling",
+            model_name="comusion",
+            modules=[self.model],
+            sample_fn=lambda: self.model.sample(
+                profile_history,
+                None,
+                batch_size=profile_history.shape[0],
+                clip_denoised=False,
+                uncond=uncond,
+            ),
+            sampling_steps=int(self.model.num_timesteps),
+            batch_size=1,
+            num_candidates=sample_num,
+        )
         Y = self.model.sample(x_0_history, None, batch_size=total_sample_num, clip_denoised=False, uncond=uncond)       # [b*sample_num, t_pred, nc]
 
         if concat_hist:
@@ -292,6 +355,8 @@ class Trainer(object):
             hm_pred_batches = []
             hm_gt_batches = []
             hm_context_batches = []
+            hm_action_batches = []
+            hm_sequence_batches = []
             saved_obs = []
             saved_tgt = []
             saved_pred = []
@@ -337,10 +402,13 @@ class Trainer(object):
                     conditioning_context.to(self.device).to(self.dtype),
                     norm_factor,
                     threshold=float(self.cfg.humanmac_multimodal_threshold),
+                    sequence_ids=extra['sequence_id'],
                 )
                 hm_pred_batches.append(pred.permute(1, 0, 2, 3).detach().cpu())
                 hm_gt_batches.append(gt.detach().cpu())
                 hm_context_batches.append(conditioning_context.detach().cpu())
+                hm_action_batches.append(extra['act'].detach().cpu().long().view(-1))
+                hm_sequence_batches.append(extra['sequence_id'].detach().cpu().long().view(-1))
                 pred_first_all = pred[0].reshape(k, self.cfg.t_pred, -1, 3)
                 gt_first = gt[0].reshape(self.cfg.t_pred, -1, 3)
                 obs_first = conditioning_context[0]
@@ -353,13 +421,40 @@ class Trainer(object):
                 print('-' * 80)
                 print(f"Samples processed: {sum(batch.shape[0] for batch in hm_gt_batches)}")
 
+            all_pred = torch.cat(hm_pred_batches, dim=1)
+            all_gt = torch.cat(hm_gt_batches, dim=0)
+            all_context = torch.cat(hm_context_batches, dim=0)
+            all_actions = torch.cat(hm_action_batches, dim=0)
+            all_sequence_ids = torch.cat(hm_sequence_batches, dim=0)
             hm_metrics = SPLINEEQNET_DIFFUSION_BATCH_EVAL(
-                torch.cat(hm_pred_batches, dim=1),
-                torch.cat(hm_gt_batches, dim=0),
-                torch.cat(hm_context_batches, dim=0),
-                torch.ones((torch.cat(hm_gt_batches, dim=0).shape[0],), dtype=torch.float32),
+                all_pred,
+                all_gt,
+                all_context,
+                torch.ones((all_gt.shape[0],), dtype=torch.float32),
                 threshold=float(self.cfg.humanmac_multimodal_threshold),
+                sequence_ids=all_sequence_ids,
             )['humanmac']
+            id_to_action = list(getattr(self.eval_dataset, 'id_to_action', []))
+            self.per_action_stats = {}
+            for action_idx in torch.unique(all_actions, sorted=True).tolist():
+                action_mask = all_actions == int(action_idx)
+                action_name = (
+                    str(id_to_action[int(action_idx)])
+                    if 0 <= int(action_idx) < len(id_to_action)
+                    else str(action_idx)
+                )
+                action_metrics = SPLINEEQNET_DIFFUSION_BATCH_EVAL(
+                    all_pred[:, action_mask],
+                    all_gt[action_mask],
+                    all_context[action_mask],
+                    torch.ones((int(action_mask.sum().item()),), dtype=torch.float32),
+                    threshold=float(self.cfg.humanmac_multimodal_threshold),
+                    sequence_ids=all_sequence_ids[action_mask],
+                )['humanmac']
+                self.per_action_stats[action_name] = {
+                    **action_metrics,
+                    'samples': int(action_mask.sum().item()),
+                }
             eval_samples_path = getattr(self.cfg, 'eval_samples_path', '')
             if eval_samples_path and saved_obs:
                 save_eval_samples_npz(
@@ -492,6 +587,11 @@ def main():
     print('Compute final stats...')
     stats = trainer.evaluation()
     print(stats)
+    append_per_action_metrics(
+        getattr(cfg, 'per_action_metrics_path', ''),
+        cfg=cfg,
+        by_action=trainer.per_action_stats,
+    )
 
     final_checkpoint_path = str(getattr(cfg, 'final_checkpoint_path', '') or '').strip()
     if final_checkpoint_path:

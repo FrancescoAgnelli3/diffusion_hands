@@ -153,6 +153,7 @@ def main() -> Dict[str, Dict[str, object]]:
             train_cfg.epochs = 0
             train_cfg.card_diffusion_epochs = 0
             train_cfg.save_eval_examples = bool(args.save_eval_examples)
+            ds_cfg.include_action_labels = model_name == "card"
 
             train_dataset, val_dataset, test_dataset = build_datasets(ds_cfg)
             train_loader, _, test_loader = make_loaders(

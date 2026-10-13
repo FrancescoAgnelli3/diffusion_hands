@@ -16,6 +16,9 @@ __all__ = ["train"]
 # Keep hard dependencies minimal for card-only runtime.
 from models.simlpe_dct import SiMLPeDCTConfig, SiMLPeDCTForecaster
 from models.card import CardConfig, CardForecaster
+from models.causal_innovation_transport import CausalInnovationConfig, CausalInnovationForecaster
+from models.fihard import CardConfig as FiHardConfig
+from models.fihard import CardForecaster as FiHardForecaster
 
 import utils as U
 
@@ -26,6 +29,7 @@ from common.evaluation import (
     humanmac_metrics_prefixed as _common_humanmac_metrics_prefixed,  # type: ignore
     save_eval_samples_npz,
 )
+from common.model_profiling import profile_once
 
 # Minimal hand graph helpers kept for card runtime compatibility.
 _HAND_BONE_LINK_1 = []
@@ -52,12 +56,14 @@ def _compute_humanmac_metrics(
     conditioning_context: torch.Tensor,
     *,
     threshold: float,
+    sequence_ids: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     return _common_humanmac_metrics_prefixed(
         pred_candidates=pred_candidates,
         gt_future=gt_future,
         conditioning_context=conditioning_context,
         threshold=threshold,
+        sequence_ids=sequence_ids,
     )
 
 def _print_model_parameters(model_or_modules, title: str = "Model") -> int:
@@ -243,6 +249,17 @@ def train(
     log_wandb: bool = False,
     wandb_run: Optional[Any] = None,
 ):
+    # Keep FiHard on the conservative pre-optimization numerical path.
+    # Its optimized standalone implementation enabled TF32 globally;
+    # explicitly disable it here so CUDA defaults cannot vary across systems.
+    is_fihard_variant = str(config.get("card_variant", model)).strip().lower() == "fihard"
+    if is_fihard_variant:
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("highest")
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+
     device = U.device()
 
     raw_model_name = str(model or "").strip()
@@ -459,10 +476,14 @@ def train(
     params: List[torch.nn.Parameter] = []
     card_model = None
     card_phase: Optional[str] = None
+    card_diffusion_subphase: Optional[str] = None
     card_diffusion_lr = float(learning_rate) * 0.1
     card_train_coarse_in_diffusion = False
     card_diffusion_coarse_warmup_epochs = 0
     card_coarse_diffusion_group_added = False
+    card_latent_baseline_pretrain_epochs = 0
+    card_latent_warmup_epochs = 0
+    card_latent_joint_lr_scale = 0.1
     mamp_encoder = None
     mamp_num_frames = input_n
     contrastive_model = None
@@ -551,6 +572,12 @@ def train(
         params_count = _print_model_parameters(simlpe_dct, title="SiMLPeDCTForecaster")
     elif model == "card":
         # Two-stage: coarse low-band DCT predictor + conditional diffusion over high bands.
+        card_variant = str(config.get("card_variant", "card")).strip().lower()
+        if card_variant not in {"card", "star_hand", "fihard", "cit"}:
+            raise ValueError(
+                "card_variant must be one of {'card', 'star_hand', 'fihard', 'cit'}, "
+                f"got {card_variant!r}"
+            )
         k_low = int(config.get("card_k_low", 16))
         diff_steps = int(config.get("card_diffusion_steps", 100))
         ddim_steps = int(config.get("card_ddim_steps", 50))
@@ -564,6 +591,10 @@ def train(
         temporal_anisotropy = bool(config.get("card_temporal_anisotropy", False))
         temporal_anisotropy_q = float(config.get("card_temporal_anisotropy_q", 1.0))
         temporal_operator_type = str(config.get("card_temporal_operator_type", "identity"))
+        if card_variant == "card":
+            # CARD baseline: separable covariance Sigma_space (x) I_time.
+            temporal_anisotropy = False
+            temporal_operator_type = "identity"
         temporal_operator_spectral_transform = str(
             config.get("card_temporal_operator_spectral_transform", "identity_shifted_power")
         )
@@ -608,6 +639,46 @@ def train(
         allow_no_conditioning = bool(config.get("card_allow_no_conditioning", False))
         coarse_target_lowpass_only = bool(config.get("card_coarse_target_lowpass_only", False))
         diffusion_only = bool(config.get("card_diffusion_only", False))
+        use_latent_variability = bool(config.get("card_use_latent_variability", False))
+        latent_dim = int(config.get("card_latent_dim", 8))
+        beta_kl = float(config.get("card_beta_kl", 1e-3))
+        kl_anneal_steps = max(0, int(config.get("card_kl_anneal_steps", 0)))
+        latent_encoder_hidden_dim = int(config.get("card_latent_encoder_hidden_dim", 256))
+        latent_conditioning_mode = str(config.get("card_latent_conditioning_mode", "add"))
+        card_latent_baseline_pretrain_epochs = max(
+            0, int(config.get("card_latent_baseline_pretrain_epochs", 0))
+        )
+        card_latent_warmup_epochs = max(
+            0, int(config.get("card_latent_warmup_epochs", 0))
+        )
+        card_latent_joint_lr_scale = float(config.get("card_latent_joint_lr_scale", 0.1))
+        explainable_latent_decomposition = bool(
+            config.get("card_explainable_latent_decomposition", False)
+        )
+        latent_action_dim = int(config.get("card_latent_action_dim", 4))
+        latent_style_dim = int(config.get("card_latent_style_dim", 4))
+        latent_residual_dim = int(config.get("card_latent_residual_dim", 4))
+        beta_action = float(config.get("card_beta_action", 0.1))
+        beta_adversarial = float(config.get("card_beta_adversarial", 0.1))
+        card_grl_anneal_steps = max(0, int(config.get("card_grl_anneal_steps", 10000)))
+        if card_latent_joint_lr_scale <= 0:
+            raise ValueError("card_latent_joint_lr_scale must be positive.")
+        if use_latent_variability and card_diffusion_epochs > 0 and (
+            card_latent_baseline_pretrain_epochs + card_latent_warmup_epochs
+            >= card_diffusion_epochs
+        ):
+            raise ValueError(
+                "CARD staged latent training requires at least one joint fine-tuning epoch: "
+                "card_latent_baseline_pretrain_epochs + card_latent_warmup_epochs "
+                "must be smaller than card_diffusion_epochs."
+            )
+        card_num_actions = max(
+            1,
+            int(config.get("card_num_actions", 1)),
+            int(getattr(getattr(loader, "dataset", None), "num_actions", 0) or 0),
+            int(getattr(getattr(val_loader, "dataset", None), "num_actions", 0) or 0),
+            int(getattr(getattr(test_loader, "dataset", None), "num_actions", 0) or 0),
+        )
         graph_laplacian_tau = float(config.get("card_graph_laplacian_tau", 1.0))
         covariance_jitter = float(config.get("card_covariance_jitter", 1e-4))
         card_use_mamp_condition = bool(config.get("card_use_mamp_condition", False))
@@ -720,7 +791,11 @@ def train(
                 node_num=node_num,
             )
 
-        tw_cfg = CardConfig(
+        config_type = FiHardConfig if card_variant == "fihard" else CardConfig
+        forecaster_type = FiHardForecaster if card_variant == "fihard" else CardForecaster
+        if card_variant == "cit":
+            config_type, forecaster_type = CausalInnovationConfig, CausalInnovationForecaster
+        tw_cfg_kwargs = dict(
             input_length=input_n,
             pred_length=output_n,
             num_nodes=node_num,
@@ -758,6 +833,19 @@ def train(
             denoiser_depth=depth,
             denoiser_heads=n_heads,
             dropout=p_drop,
+            use_latent_variability=use_latent_variability,
+            latent_dim=latent_dim,
+            beta_kl=beta_kl,
+            kl_anneal_steps=kl_anneal_steps,
+            latent_encoder_hidden_dim=latent_encoder_hidden_dim,
+            latent_conditioning_mode=latent_conditioning_mode,
+            num_actions=card_num_actions,
+            explainable_latent_decomposition=explainable_latent_decomposition,
+            latent_action_dim=latent_action_dim,
+            latent_style_dim=latent_style_dim,
+            latent_residual_dim=latent_residual_dim,
+            beta_action=beta_action,
+            beta_adversarial=beta_adversarial,
             freeze_coarse=freeze_coarse,
             cond_use_history=cond_use_history,
             cond_use_coarse=cond_use_coarse,
@@ -772,12 +860,54 @@ def train(
             simlpe_norm_axis=str(config.get("simlpe_norm_axis", "spatial")),
             simlpe_add_last_offset=bool(config.get("simlpe_add_last_offset", True)),
         )
-        card_model = CardForecaster(
+        if card_variant == "fihard":
+            for latent_key in (
+                "use_latent_variability",
+                "latent_dim",
+                "beta_kl",
+                "kl_anneal_steps",
+                "latent_encoder_hidden_dim",
+                "latent_conditioning_mode",
+                "num_actions",
+                "explainable_latent_decomposition",
+                "latent_action_dim",
+                "latent_style_dim",
+                "latent_residual_dim",
+                "beta_action",
+                "beta_adversarial",
+            ):
+                tw_cfg_kwargs.pop(latent_key, None)
+        if card_variant == "cit":
+            options = dict(config.get("proposal_options", {}))
+            allowed = {"propagation", "max_persistence", "scale_floor",
+                       "terminal_kinematic_projection", "grip_phase_transport",
+                       "grip_clock_hidden_dim", "grip_clock_loss_weight",
+                       "grip_phase_strength", "grip_clock_conditioning",
+                       "grip_joint_shared_noise", "grip_joint_noise_strength"}
+            unknown = set(options) - allowed
+            if unknown:
+                raise ValueError(f"Unknown {card_variant} options: {sorted(unknown)}")
+            tw_cfg_kwargs.update(options)
+        tw_cfg = config_type(**tw_cfg_kwargs)
+        train_action_ids = getattr(getattr(loader, "dataset", None), "window_action_ids", None)
+        action_class_weights = None
+        if torch.is_tensor(train_action_ids) and int(train_action_ids.numel()) > 0:
+            action_counts = torch.bincount(train_action_ids.long(), minlength=card_num_actions).float()
+            action_class_weights = torch.where(
+                action_counts > 0,
+                torch.rsqrt(torch.clamp(action_counts, min=1.0)),
+                torch.zeros_like(action_counts),
+            )
+            positive = action_class_weights > 0
+            if torch.any(positive):
+                action_class_weights = action_class_weights / action_class_weights[positive].mean()
+        card_model = forecaster_type(
             tw_cfg,
             metadata={
                 "wrist_index": int(card_wrist_index),
                 "edges": tuple((int(i), int(j)) for i, j in card_links),
                 "empirical_feature_covariance": empirical_feature_covariance,
+                "action_class_weights": action_class_weights,
             },
         ).to(device)
         if card_use_any_mamp_condition:
@@ -897,22 +1027,117 @@ def train(
             except Exception as exc:
                 print(f"[Warning] Failed to load coarse model from {coarse_model_path}: {exc}")
 
+        def _card_latent_module_parameters() -> List[torch.nn.Parameter]:
+            latent_params: List[torch.nn.Parameter] = []
+            denoiser = card_model.diffusion.denoiser
+            latent_proj = getattr(denoiser, "latent_proj", None)
+            if latent_proj is not None:
+                latent_params.extend(list(latent_proj.parameters()))
+            latent_gate = getattr(denoiser, "latent_gate", None)
+            if latent_gate is not None:
+                latent_params.append(latent_gate)
+            for module in (
+                getattr(card_model, "action_embedding", None),
+                getattr(card_model, "latent_encoder", None),
+                getattr(card_model, "action_prior", None),
+                getattr(card_model, "action_classifier", None),
+                getattr(card_model, "adversarial_classifier", None),
+            ):
+                if module is not None:
+                    latent_params.extend(list(module.parameters()))
+            return latent_params
+
+        def _set_card_diffusion_subphase(subphase: str) -> List[torch.nn.Parameter]:
+            nonlocal card_diffusion_subphase
+            valid = {"baseline_pretrain", "latent_warmup", "joint"}
+            if subphase not in valid:
+                raise ValueError(f"Unknown CARD diffusion subphase: {subphase!r}")
+
+            for p in card_model.coarse.parameters():
+                p.requires_grad = False
+            for p in card_model.diffusion.parameters():
+                p.requires_grad = False
+            for module in (
+                getattr(card_model, "action_embedding", None),
+                getattr(card_model, "latent_encoder", None),
+                getattr(card_model, "action_prior", None),
+                getattr(card_model, "action_classifier", None),
+                getattr(card_model, "adversarial_classifier", None),
+            ):
+                if module is not None:
+                    for p in module.parameters():
+                        p.requires_grad = False
+
+            latent_params = _card_latent_module_parameters()
+            latent_ids = {id(p) for p in latent_params}
+            reference = getattr(card_model.diffusion, "conditional_reference", None)
+            reference_ids = {id(p) for p in reference.parameters()} if reference is not None else set()
+            base_params = [
+                p for p in card_model.diffusion.parameters() if id(p) not in latent_ids | reference_ids
+            ]
+            selected: List[torch.nn.Parameter] = []
+            if subphase in {"baseline_pretrain", "joint"}:
+                for p in base_params:
+                    p.requires_grad = True
+                selected.extend(base_params)
+            if subphase in {"latent_warmup", "joint"}:
+                for p in latent_params:
+                    p.requires_grad = True
+                selected.extend(latent_params)
+            card_diffusion_subphase = subphase
+            return selected
+
+        def _initial_card_diffusion_subphase() -> str:
+            if not use_latent_variability:
+                return "joint"
+            if card_latent_baseline_pretrain_epochs > 0:
+                return "baseline_pretrain"
+            if card_latent_warmup_epochs > 0:
+                return "latent_warmup"
+            return "joint"
+
+        def _build_card_diffusion_optimizer() -> torch.optim.Optimizer:
+            trainable = [
+                p for p in card_model.parameters() if p.requires_grad
+            ]
+            if card_diffusion_subphase != "joint" or not use_latent_variability:
+                return torch.optim.Adam(trainable, lr=card_diffusion_lr)
+            latent_ids = {id(p) for p in _card_latent_module_parameters()}
+            latent_trainable = [p for p in trainable if id(p) in latent_ids]
+            base_trainable = [p for p in trainable if id(p) not in latent_ids]
+            groups: List[Dict[str, Any]] = []
+            if latent_trainable:
+                groups.append({"params": latent_trainable, "lr": card_diffusion_lr})
+            if base_trainable:
+                groups.append({
+                    "params": base_trainable,
+                    "lr": card_diffusion_lr * card_latent_joint_lr_scale,
+                })
+            return torch.optim.Adam(groups)
+
         def _set_card_phase(phase: str) -> List[torch.nn.Parameter]:
-            nonlocal card_phase
+            nonlocal card_phase, card_diffusion_subphase
             if phase == "coarse":
                 for p in card_model.coarse.parameters():
                     p.requires_grad = True
                 for p in card_model.diffusion.parameters():
                     p.requires_grad = False
+                for module in (
+                    getattr(card_model, "action_embedding", None),
+                    getattr(card_model, "latent_encoder", None),
+                    getattr(card_model, "action_prior", None),
+                    getattr(card_model, "action_classifier", None),
+                    getattr(card_model, "adversarial_classifier", None),
+                ):
+                    if module is not None:
+                        for p in module.parameters():
+                            p.requires_grad = False
                 card_phase = "coarse"
+                card_diffusion_subphase = None
                 return [p for p in card_model.coarse.parameters() if p.requires_grad]
             if phase == "diffusion":
-                for p in card_model.coarse.parameters():
-                    p.requires_grad = False
-                for p in card_model.diffusion.parameters():
-                    p.requires_grad = True
                 card_phase = "diffusion"
-                return [p for p in card_model.diffusion.parameters() if p.requires_grad]
+                return _set_card_diffusion_subphase(_initial_card_diffusion_subphase())
             raise ValueError(f"Unknown card phase: {phase}")
 
         params = _set_card_phase("coarse")
@@ -921,7 +1146,15 @@ def train(
             params = _set_card_phase(eval_phase)
         init_lr = card_diffusion_lr if card_phase == "diffusion" else learning_rate
         optimizer = torch.optim.Adam(params, lr=init_lr)
-        params_count = _print_model_parameters(card_model, title="CardForecaster")
+        params_count = _print_model_parameters(
+            card_model,
+            title={
+                "card": "CARDForecaster (V=I)",
+                "star_hand": "STARHandForecaster",
+                "fihard": "FiHardForecaster",
+                "cit": "CausalInnovationTransport",
+            }[card_variant],
+        )
 
     model_modules: Dict[str, torch.nn.Module] = {}
     if model == "simlpe_dct" and 'simlpe_dct' in locals():
@@ -946,7 +1179,18 @@ def train(
             return
         for name, module in model_modules.items():
             if name in state:
-                module.load_state_dict(state[name])
+                strict = not (
+                    name == "card"
+                    and card_model is not None
+                    and bool(getattr(card_model.cfg, "use_latent_variability", False))
+                )
+                missing, unexpected = module.load_state_dict(state[name], strict=strict)
+                if not strict and (missing or unexpected):
+                    print(
+                        "[Warning] Loaded CARD checkpoint with latent variability enabled "
+                        f"using strict=False; missing={len(missing)} unexpected={len(unexpected)}. "
+                        "New latent modules were initialized from scratch."
+                    )
 
     def _resize_mamp_time(coords_3d: torch.Tensor) -> torch.Tensor:
         if int(coords_3d.shape[1]) == int(mamp_num_frames):
@@ -1063,6 +1307,39 @@ def train(
                 coarse_feat = c
         return hist_feat, coarse_feat
 
+    def _extract_action_id(aux_payload: Any) -> Optional[torch.Tensor]:
+        if isinstance(aux_payload, dict):
+            action_id = aux_payload.get("action_id")
+            if torch.is_tensor(action_id):
+                return action_id
+        return None
+
+    def _extract_sequence_id(aux_payload: Any) -> Optional[torch.Tensor]:
+        if isinstance(aux_payload, dict):
+            value = aux_payload.get("sequence_id")
+            return value if torch.is_tensor(value) else None
+        return None
+
+    card_diffusion_global_step = 0
+
+    def _current_beta_kl() -> float:
+        if card_model is None or not bool(getattr(card_model.cfg, "use_latent_variability", False)):
+            return 0.0
+        if card_diffusion_subphase == "baseline_pretrain":
+            return 0.0
+        beta = float(getattr(card_model.cfg, "beta_kl", 0.0))
+        steps = int(getattr(card_model.cfg, "kl_anneal_steps", 0))
+        if steps <= 0:
+            return beta
+        return beta * min(1.0, float(card_diffusion_global_step) / float(steps))
+
+    def _current_grl_strength() -> float:
+        if not explainable_latent_decomposition or card_diffusion_subphase == "baseline_pretrain":
+            return 0.0
+        if card_grl_anneal_steps <= 0:
+            return 1.0
+        return min(1.0, float(card_diffusion_global_step) / float(card_grl_anneal_steps))
+
     load_model_path = str(config.get("load_model_path", "")).strip()
     if load_model_path:
         if os.path.exists(load_model_path):
@@ -1074,6 +1351,8 @@ def train(
                 if isinstance(payload, dict):
                     if "best_model_state" in payload:
                         state = payload["best_model_state"]
+                    elif "final_model_state" in payload:
+                        state = payload["final_model_state"]
                     elif "model_state" in payload:
                         state = payload["model_state"]
                     else:
@@ -1134,6 +1413,8 @@ def train(
         humanmac_pred_batches: List[torch.Tensor] = []
         humanmac_tgt_batches: List[torch.Tensor] = []
         humanmac_context_batches: List[torch.Tensor] = []
+        humanmac_action_batches: List[torch.Tensor] = []
+        humanmac_sequence_batches: List[torch.Tensor] = []
         collect_card_tries = (
             bool(config.get("card_eval_collect_all", False))
             and model == "card"
@@ -1161,6 +1442,8 @@ def train(
                         norm_factor = batch[2] if len(batch) > 2 else None
                         cached_aux = batch[3] if len(batch) > 3 else None
                         cached_mamp_feat, cached_mamp_feat_coarse = _extract_cached_mamp_features(cached_aux)
+                        action_id = _extract_action_id(cached_aux)
+                        sequence_id = _extract_sequence_id(cached_aux)
                     else:
                         raise TypeError("Expected batch from loader to be a tuple/list.")
 
@@ -1174,6 +1457,11 @@ def train(
                         ).view(-1)
                     else:
                         norm_factor_t = torch.ones(inp.size(0), device=device)
+                    action_id_t = (
+                        action_id.to(device=device, dtype=torch.long, non_blocking=True).view(-1)
+                        if action_id is not None
+                        else None
+                    )
 
                     tgt_3d = out[:, :, :, 4:]
                     tgt_vel = out[:, :, :, 3]
@@ -1210,6 +1498,18 @@ def train(
                         card_mamp_feat = _merge_mamp_features(card_mamp_hist_feat, card_mamp_coarse_feat)
 
                     if model == "simlpe_dct":
+                        profile_once(
+                            key="simlpe_dct_sampling",
+                            model_name=str(
+                                config.get("result_model_name", "simlpe")
+                            ),
+                            modules=[simlpe_dct],
+                            sample_fn=lambda: simlpe_dct(in_3d[:1]),
+                            sampling_steps=1,
+                            batch_size=1,
+                            num_candidates=1,
+                            notes="Deterministic single-pass forecast",
+                        )
                         recons = simlpe_dct(in_3d)
                     elif model == "card":
                         if card_phase == "coarse":
@@ -1217,12 +1517,64 @@ def train(
                         else:
                             selection_k = max(1, int(num_candidates))
                             humanmac_k = selection_k if compute_humanmac_metrics else 1
+
+                            def _profile_card_sampling():
+                                profile_input = in_3d[:1]
+                                if diffusion_only:
+                                    profile_coarse = card_model._zero_coarse_future(
+                                        profile_input
+                                    )
+                                else:
+                                    profile_coarse = card_model.coarse(profile_input)
+                                profile_mamp = (
+                                    card_mamp_feat[:1]
+                                    if card_mamp_feat is not None
+                                    else None
+                                )
+                                profile_action = (
+                                    action_id_t[:1]
+                                    if action_id_t is not None
+                                    else None
+                                )
+                                candidates = []
+                                for profile_index in range(selection_k):
+                                    candidates.append(
+                                        card_model.predict(
+                                            profile_input,
+                                            mamp_feat=profile_mamp,
+                                            coarse_future=profile_coarse,
+                                            deterministic=False,
+                                            seed=profile_index,
+                                            action_id=profile_action,
+                                        )
+                                    )
+                                return torch.stack(candidates, dim=0)
+
+                            profile_modules = [card_model]
+                            if mamp_encoder is not None:
+                                profile_modules.append(mamp_encoder)
+                            profile_once(
+                                key=f"{card_variant}_sampling",
+                                model_name=str(
+                                    config.get("result_model_name", card_variant)
+                                ),
+                                modules=profile_modules,
+                                sample_fn=_profile_card_sampling,
+                                sampling_steps=(
+                                    int(ddim_steps),
+                                ),
+                                batch_size=1,
+                                num_candidates=selection_k,
+                                notes=("K full-trajectory causal innovation ODE solves plus one coarse forecast"
+                                       if card_variant == "cit" else "K serial DDIM trajectories plus one coarse forecast"),
+                            )
                             if selection_k <= 1 and humanmac_k <= 1:
                                 recons = card_model.predict(
                                     in_3d,
                                     mamp_feat=card_mamp_feat,
                                     coarse_future=coarse_future_for_condition,
                                     deterministic=True,
+                                    action_id=action_id_t,
                                 )
                                 if compute_humanmac_metrics:
                                     humanmac_candidates_batch = recons.unsqueeze(0)
@@ -1239,6 +1591,7 @@ def train(
                                         deterministic=False,
                                         seed=sample_seed,
                                         return_score=True,
+                                        action_id=action_id_t,
                                     )
                                     all_recons.append(sampled_recons)
                                     all_scores.append(sampled_score)
@@ -1263,6 +1616,7 @@ def train(
                                         mamp_feat=card_mamp_feat,
                                         coarse_future=coarse_future_for_condition,
                                         deterministic=True,
+                                        action_id=action_id_t,
                                     )
                                 else:
                                     stacked_recons = torch.stack(all_recons[:selection_k], dim=0)  # (K, B, T_out, N, 3)
@@ -1292,6 +1646,10 @@ def train(
                         humanmac_pred_batches.append(humanmac_candidates_batch.detach().cpu())
                         humanmac_tgt_batches.append(tgt_3d.detach().cpu())
                         humanmac_context_batches.append(in_3d.detach().cpu())
+                        if action_id_t is not None:
+                            humanmac_action_batches.append(action_id_t.detach().cpu())
+                        if sequence_id is not None:
+                            humanmac_sequence_batches.append(sequence_id.detach().cpu().long().view(-1))
 
                     mpjpe_terms = torch.norm(recons - tgt_3d, dim=-1)
                     per_sample_mpjpe = mpjpe_terms.mean(dim=(1, 2))
@@ -1360,8 +1718,35 @@ def train(
                 torch.cat(humanmac_tgt_batches, dim=0),
                 torch.cat(humanmac_context_batches, dim=0),
                 threshold=float(config.get("humanmac_multimodal_threshold", 0.5)),
+                sequence_ids=(torch.cat(humanmac_sequence_batches, dim=0)
+                              if humanmac_sequence_batches else None),
             )
             metrics.update(humanmac_metrics)
+            if humanmac_action_batches:
+                all_pred = torch.cat(humanmac_pred_batches, dim=1)
+                all_tgt = torch.cat(humanmac_tgt_batches, dim=0)
+                all_context = torch.cat(humanmac_context_batches, dim=0)
+                all_actions = torch.cat(humanmac_action_batches, dim=0).long()
+                id_to_action = list(getattr(getattr(eval_loader, "dataset", None), "id_to_action", []))
+                by_action: Dict[str, Dict[str, float]] = {}
+                for action_idx in torch.unique(all_actions, sorted=True).tolist():
+                    mask = all_actions == int(action_idx)
+                    action_name = (
+                        str(id_to_action[int(action_idx)])
+                        if 0 <= int(action_idx) < len(id_to_action)
+                        else str(action_idx)
+                    )
+                    action_metrics = _compute_humanmac_metrics(
+                        all_pred[:, mask],
+                        all_tgt[mask],
+                        all_context[mask],
+                        threshold=float(config.get("humanmac_multimodal_threshold", 0.5)),
+                        sequence_ids=(torch.cat(humanmac_sequence_batches, dim=0)[mask]
+                                      if humanmac_sequence_batches else None),
+                    )
+                    action_metrics["samples"] = float(mask.sum().item())
+                    by_action[action_name] = action_metrics
+                metrics["by_action"] = by_action
         if collect_card_tries and per_try_loss is not None and per_try_loss_norm is not None:
             per_try_mpjpe = [val / max(1, total_samples) for val in per_try_loss]
             per_try_mpjpe_norm = [val / max(1, total_samples) for val in per_try_loss_norm]
@@ -1388,7 +1773,14 @@ def train(
 
     n_train_windows = len(getattr(loader, "dataset", []))
     print(f"Training on {n_train_windows} windows")
-    print(f"Config: input_n={input_n}, output_n={output_n}, hidden_size={hidden_size}, batch_size={batch_size}, model={model}")
+    # `model` is the internal backend name (usually ``card`` for all CARD
+    # family variants).  Use the externally requested model label when it is
+    # available so logs distinguish FiHARD/CIT/grip variants correctly.
+    log_model_name = str(config.get("result_model_name", model))
+    print(
+        f"Config: input_n={input_n}, output_n={output_n}, hidden_size={hidden_size}, "
+        f"batch_size={batch_size}, model={log_model_name} (backend={model})"
+    )
 
     best_test_mpjpe = None
     best_test_mpjpe_norm = None
@@ -1417,13 +1809,31 @@ def train(
     # Warmup is applied relative to this boundary.
     early_stop_stage_start_epoch = 1
 
+    protocol_updates = {"coarse": 0, "diffusion": 0}
+    if config.get("protocol_audit_path"):
+        # Isolate training randomness from architecture-dependent initialization.
+        torch.manual_seed(int(config["seed"]))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(config["seed"]))
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     for epoch in range(1, total_epochs + 1):
         if model == "card" and card_phase == "coarse":
             if card_diffusion_epochs > 0 and epoch == train_epochs + 1:
                 if maybe_save_coarse_model is not None:
                     maybe_save_coarse_model()
                 params = _set_card_phase("diffusion")
-                optimizer = torch.optim.Adam(params, lr=card_diffusion_lr)
+                if card_variant == "cit":
+                    calibration = card_model.calibrate_reference(loader)
+                    print(f"[CIT train-only reference calibration] {calibration}")
+                    if config.get("protocol_audit_path"):
+                        import json
+                        from pathlib import Path
+                        Path(config["protocol_audit_path"]).with_name("calibration_audit.json").write_text(
+                            json.dumps(calibration, indent=2)
+                        )
+                optimizer = _build_card_diffusion_optimizer()
                 card_coarse_diffusion_group_added = False
                 if use_lr_scheduler:
                     scheduler = ReduceLROnPlateau(
@@ -1451,9 +1861,44 @@ def train(
                     early_stop_bad_epochs = 0
                     early_stop_stage_start_epoch = epoch
                 print(f"[Info] Switched to card diffusion training for {card_diffusion_epochs} epochs.")
+        if model == "card" and card_phase == "diffusion" and use_latent_variability:
+            diffusion_stage_epoch = epoch - train_epochs
+            if diffusion_stage_epoch <= card_latent_baseline_pretrain_epochs:
+                desired_subphase = "baseline_pretrain"
+            elif diffusion_stage_epoch <= (
+                card_latent_baseline_pretrain_epochs + card_latent_warmup_epochs
+            ):
+                desired_subphase = "latent_warmup"
+            else:
+                desired_subphase = "joint"
+            if desired_subphase != card_diffusion_subphase:
+                params = _set_card_diffusion_subphase(desired_subphase)
+                optimizer = _build_card_diffusion_optimizer()
+                card_coarse_diffusion_group_added = False
+                if use_lr_scheduler:
+                    scheduler = ReduceLROnPlateau(
+                        optimizer,
+                        mode='min',
+                        factor=float(config.get("lr_factor", 0.5)),
+                        patience=int(config.get("lr_patience", 5)),
+                        threshold=float(config.get("lr_threshold", 1e-4)),
+                        cooldown=int(config.get("lr_cooldown", 0)),
+                        min_lr=float(config.get("lr_min", 0.0)),
+                    )
+                early_stop_best = None
+                early_stop_bad_epochs = 0
+                early_stop_stage_start_epoch = epoch
+                print(
+                    f"[Info] CARD diffusion subphase -> {desired_subphase} "
+                    f"at diffusion_epoch={diffusion_stage_epoch}."
+                )
         if (
             model == "card"
             and card_phase == "diffusion"
+            and (
+                not use_latent_variability
+                or card_diffusion_subphase in {"baseline_pretrain", "joint"}
+            )
             and card_train_coarse_in_diffusion
             and not card_coarse_diffusion_group_added
         ):
@@ -1481,6 +1926,36 @@ def train(
         mpjpe_norm_running = 0.0
         vel_running = 0.0
         diffusion_running = 0.0
+        kl_running = 0.0
+        beta_kl_running = 0.0
+        total_diffusion_running = 0.0
+        latent_metric_running = {
+            "posterior_mu_abs": 0.0,
+            "posterior_std": 0.0,
+            "prior_mu_abs": 0.0,
+            "prior_std": 0.0,
+            "latent_gate": 0.0,
+            "kl_structured": 0.0,
+            "kl_residual": 0.0,
+            "action_loss": 0.0,
+            "adversarial_loss": 0.0,
+            "action_balanced_accuracy": 0.0,
+            "adversarial_balanced_accuracy": 0.0,
+            "grl_strength": 0.0,
+            "flow_matching_loss": 0.0,
+            "grip_clock_loss": 0.0,
+            "hand_energy_loss": 0.0,
+            "hand_energy_accuracy": 0.0,
+            "hand_energy_real_score": 0.0,
+            "hand_energy_fake_score": 0.0,
+            **{
+                f"{factor}_{stat}": 0.0
+                for factor in ("action", "style", "residual")
+                for stat in (
+                    "posterior_mu_abs", "posterior_std", "prior_mu_abs", "prior_std"
+                )
+            },
+        }
         n_seen = 0
         t0 = time.time()
         for it, batch in enumerate(loader):
@@ -1491,6 +1966,7 @@ def train(
                 norm_factor = batch[2] if len(batch) > 2 else None
                 cached_aux = batch[3] if len(batch) > 3 else None
                 cached_mamp_feat, cached_mamp_feat_coarse = _extract_cached_mamp_features(cached_aux)
+                action_id = _extract_action_id(cached_aux)
             else:
                 raise TypeError("Expected batch from loader to be a tuple/list.")
             # Shapes: inp (B, T_in, N, 7), out (B, T_out, N, 7)
@@ -1504,6 +1980,11 @@ def train(
                 ).view(-1)
             else:
                 norm_factor_t = torch.ones(inp.size(0), device=device)
+            action_id_t = (
+                action_id.to(device=device, dtype=torch.long, non_blocking=True).view(-1)
+                if action_id is not None
+                else None
+            )
 
             # Prepare inputs/targets as in prediction_model.py
             tgt_vel = out[:, :, :, 3]
@@ -1553,14 +2034,22 @@ def train(
                         else:
                             card_mamp_coarse_feat = _compute_mamp_feat(coarse_for_mamp)
                     card_mamp_feat = _merge_mamp_features(card_mamp_hist_feat, card_mamp_coarse_feat)
-                    diffusion_loss, coarse_pred = card_model.diffusion_loss(
+                    beta_kl_current = _current_beta_kl()
+                    diffusion_loss, coarse_pred, diffusion_metrics = card_model.diffusion_loss(
                         in_3d,
                         tgt_3d,
                         mamp_feat=card_mamp_feat,
                         coarse_future=coarse_future_for_condition,
                         allow_coarse_grad=coarse_grad_active,
+                        action_id=action_id_t,
+                        beta_kl_current=beta_kl_current,
+                        return_metrics=True,
+                        disable_latent=(card_diffusion_subphase == "baseline_pretrain"),
+                        grl_strength=_current_grl_strength(),
                     )
                     recons = coarse_pred
+                    if card_diffusion_subphase != "baseline_pretrain":
+                        card_diffusion_global_step += 1
                 else:
                     recons = card_model.coarse(in_3d)
             # Loss: MPJPE + bone length regularization
@@ -1606,7 +2095,25 @@ def train(
                 loss = loss + velocity_loss_weight * vel_loss
             vel_running += float(vel_mae_per_sample.sum().item())
             if diffusion_loss is not None:
-                diffusion_running += float(diffusion_loss.item()) * inp.size(0)
+                if 'diffusion_metrics' in locals():
+                    if "diffusion_loss" in diffusion_metrics:
+                        diffusion_running += float(diffusion_metrics["diffusion_loss"].item()) * inp.size(0)
+                    else:
+                        diffusion_running += float(diffusion_loss.item()) * inp.size(0)
+                    if "kl_loss" in diffusion_metrics:
+                        kl_running += float(diffusion_metrics["kl_loss"].item()) * inp.size(0)
+                    if "beta_kl_current" in diffusion_metrics:
+                        beta_kl_running += float(diffusion_metrics["beta_kl_current"].item()) * inp.size(0)
+                    if "total_loss" in diffusion_metrics:
+                        total_diffusion_running += float(diffusion_metrics["total_loss"].item()) * inp.size(0)
+                    for metric_name in latent_metric_running:
+                        if metric_name in diffusion_metrics:
+                            latent_metric_running[metric_name] += (
+                                float(diffusion_metrics[metric_name].item()) * inp.size(0)
+                            )
+                    del diffusion_metrics
+                else:
+                    diffusion_running += float(diffusion_loss.item()) * inp.size(0)
 
             # Abort immediately if loss becomes NaN/Inf during any batch
             if not torch.isfinite(loss):
@@ -1622,6 +2129,8 @@ def train(
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(params, max_norm=max_norm)
                 optimizer.step()
+                if config.get("protocol_audit_path"):
+                    protocol_updates[card_phase] += 1
 
             running += float(loss.item()) * inp.size(0)
             # Scoring loss (weighted joint MAE) as in test_prediction.py (not used for backprop)
@@ -1637,11 +2146,43 @@ def train(
         mpjpe_norm_avg = mpjpe_norm_running / max(1, n_seen)
         vel_avg = vel_running / max(1, n_seen)
         diffusion_avg = diffusion_running / max(1, n_seen)
+        kl_avg = kl_running / max(1, n_seen)
+        beta_kl_avg = beta_kl_running / max(1, n_seen)
+        total_diffusion_avg = total_diffusion_running / max(1, n_seen)
+        latent_metric_avg = {
+            key: value / max(1, n_seen) for key, value in latent_metric_running.items()
+        }
         objective_train_loss = diffusion_avg if (model == "card" and card_phase == "diffusion") else epoch_loss
+        if model == "card" and card_phase == "diffusion" and total_diffusion_running > 0.0:
+            objective_train_loss = total_diffusion_avg
         vel_clause = f"| vel_mae={vel_avg:.6f} "
         phase_clause = ""
         if model == "card":
             phase_clause = f"| phase={card_phase} | diff_loss={diffusion_avg:.6f}"
+            if card_phase == "diffusion" and card_diffusion_subphase is not None:
+                phase_clause += f" | diffusion_subphase={card_diffusion_subphase}"
+            if card_model is not None and bool(getattr(card_model.cfg, "use_latent_variability", False)):
+                phase_clause += f" | kl_loss={kl_avg:.6f} | beta_kl={beta_kl_avg:.6g}"
+                phase_clause += (
+                    f" | q_mu={latent_metric_avg['posterior_mu_abs']:.4f}"
+                    f" q_std={latent_metric_avg['posterior_std']:.4f}"
+                    f" p_mu={latent_metric_avg['prior_mu_abs']:.4f}"
+                    f" p_std={latent_metric_avg['prior_std']:.4f}"
+                    f" z_gate={latent_metric_avg['latent_gate']:.4f}"
+                )
+                if explainable_latent_decomposition:
+                    phase_clause += (
+                        f" | kl_as={latent_metric_avg['kl_structured']:.4f}"
+                        f" kl_r={latent_metric_avg['kl_residual']:.4f}"
+                        f" act={latent_metric_avg['action_loss']:.4f}"
+                        f" adv={latent_metric_avg['adversarial_loss']:.4f}"
+                        f" act_bacc={latent_metric_avg['action_balanced_accuracy']:.3f}"
+                        f" adv_bacc={latent_metric_avg['adversarial_balanced_accuracy']:.3f}"
+                        f" grl={latent_metric_avg['grl_strength']:.3f}"
+                        f" factor_q_std=(a:{latent_metric_avg['action_posterior_std']:.3f},"
+                        f"s:{latent_metric_avg['style_posterior_std']:.3f},"
+                        f"r:{latent_metric_avg['residual_posterior_std']:.3f})"
+                    )
         print(
             f"[Epoch {epoch:03d}] loss={objective_train_loss:.6f} | mpjpe={mpjpe_avg:.6f} | "
             f"mpjpe_norm={mpjpe_norm_avg:.6f}{vel_clause}"
@@ -1698,6 +2239,12 @@ def train(
             if model == "card":
                 _maybe_add_metric(wandb_metrics, "train/card_phase", 0.0 if card_phase == "coarse" else 1.0)
                 _maybe_add_metric(wandb_metrics, "train/diffusion_loss", diffusion_avg)
+                if card_model is not None and bool(getattr(card_model.cfg, "use_latent_variability", False)):
+                    _maybe_add_metric(wandb_metrics, "train/kl_loss", kl_avg)
+                    _maybe_add_metric(wandb_metrics, "train/beta_kl_current", beta_kl_avg)
+                    _maybe_add_metric(wandb_metrics, "train/diffusion_total_loss", total_diffusion_avg)
+                    for metric_name, metric_value in latent_metric_avg.items():
+                        _maybe_add_metric(wandb_metrics, f"train/{metric_name}", metric_value)
             _maybe_add_metric(wandb_metrics, "train/time_s", dt)
             lr_value = optimizer.param_groups[0]['lr'] if optimizer is not None else None
             _maybe_add_metric(wandb_metrics, "train/lr", lr_value)
@@ -1721,7 +2268,15 @@ def train(
             if scheduler is not None:
                 scheduler.step(float(objective_train_loss))
 
-        if early_stop_enabled:
+        staged_latent_before_joint = bool(
+            model == "card"
+            and use_latent_variability
+            and (
+                card_phase == "coarse"
+                or (card_phase == "diffusion" and card_diffusion_subphase != "joint")
+            )
+        )
+        if early_stop_enabled and not staged_latent_before_joint:
             if early_stop_monitor == "test_mpjpe":
                 monitored = avg_loss
             elif early_stop_monitor == "train_mpjpe":
@@ -1760,6 +2315,9 @@ def train(
                                 break
 
     last_state = _capture_state()
+    if config.get("protocol_audit_path"):
+        from common.research_protocol import audit_training
+        audit_training(card_model, config["protocol_audit_path"], protocol_updates, config, params_count)
 
     if maybe_save_coarse_model is not None:
         maybe_save_coarse_model()
@@ -1770,6 +2328,22 @@ def train(
         if best_test_state is not None:
             _load_state(best_test_state)
         val_metrics_best = _evaluate_loader(val_loader, collect_examples=True, restore_train=False, save_examples=save_eval_examples)
+        if (
+            model == "card"
+            and card_model is not None
+            and bool(config.get("card_explainability_enabled", False))
+            and bool(getattr(card_model, "explainable_latent_decomposition", False))
+        ):
+            from explainability import generate_latent_explainability_artifacts
+            explainability_summary = generate_latent_explainability_artifacts(
+                card_model,
+                val_loader,
+                device=device,
+                output_dir=str(config.get("explainability_output_dir", "")),
+                ddim_steps=max(1, int(config.get("card_explainability_steps", card_model.cfg.ddim_steps))),
+                seed=int(config.get("seed", 0)),
+            )
+            print(f"[Explainability] {explainability_summary}")
         if state_snapshot is not None:
             _load_state(state_snapshot)
 
@@ -1813,6 +2387,23 @@ def train(
         val_humanmac_fid_best = None
         val_samples = 0
 
+    dataset_action_to_id = dict(
+        getattr(getattr(loader, "dataset", None), "action_to_id", {}) or {}
+    )
+    checkpoint_metadata = {
+        "tag": config.get("best_model_tag"),
+        "model": model,
+        "dataset": config.get("dataset"),
+        "action_to_id": dataset_action_to_id,
+    }
+    if model == "card":
+        from dataclasses import asdict
+        checkpoint_metadata.update(
+            card_variant=card_variant,
+            forecaster_config=asdict(card_model.cfg),
+            graph_metadata={"wrist_index": int(card_wrist_index), "edges": card_links},
+        )
+
     best_model_path = config.get("best_model_path")
     if best_model_path:
         if best_test_state is not None:
@@ -1820,11 +2411,7 @@ def train(
             torch.save(
                 {
                     "best_model_state": best_test_state,
-                    "metadata": {
-                        "tag": config.get("best_model_tag"),
-                        "model": model,
-                        "dataset": config.get("dataset"),
-                    },
+                    "metadata": checkpoint_metadata,
                 },
                 best_model_path,
             )
@@ -1835,9 +2422,7 @@ def train(
                 {
                     "best_model_state": last_state,
                     "metadata": {
-                        "tag": config.get("best_model_tag"),
-                        "model": model,
-                        "dataset": config.get("dataset"),
+                        **checkpoint_metadata,
                         "note": "last_state_after_diffusion",
                     },
                 },
@@ -1854,11 +2439,7 @@ def train(
             torch.save(
                 {
                     "final_model_state": last_state,
-                    "metadata": {
-                        "tag": config.get("best_model_tag"),
-                        "model": model,
-                        "dataset": config.get("dataset"),
-                    },
+                    "metadata": checkpoint_metadata,
                 },
                 final_model_path,
             )
@@ -1887,6 +2468,9 @@ def train(
         ),
         "validation_mpjpe_norm_by_try": (
             val_metrics_best.get("mpjpe_norm_by_try") if val_metrics_best is not None else None
+        ),
+        "validation_by_action": (
+            val_metrics_best.get("by_action", {}) if val_metrics_best is not None else {}
         ),
         "test_mpjpe_best": best_test_mpjpe if test_loader is not None else None,
         "test_mpjpe_norm_best": best_test_mpjpe_norm if test_loader is not None else None,

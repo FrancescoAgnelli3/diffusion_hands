@@ -363,6 +363,14 @@ class DatasetAssembly(Dataset):
                     norm_factor = np.array([self.norm_factors.get(action, 1.0)], dtype=np.float32)
                     yield traj, norm_factor
 
+    def iter_generator_with_sequence_id(self, step=25):
+        for data_s in self.data.values():
+            for sequence_id, (_action, seq) in enumerate(data_s.items()):
+                seq_len = seq.shape[0]
+                for i in range(0, seq_len - self.t_total, step):
+                    traj = seq[None, i: i + self.t_total]
+                    yield traj, int(sequence_id)
+
 
 class DatasetAssemblyMulti(DatasetAssembly):
     pass

@@ -137,18 +137,40 @@ def run_experiment(
         "log_wandb": bool(log_wandb),
         "dataset": ds.dataset,
         "action_filter": ds.action_filter,
+        "seed": int(ds.seed),
         "edge_index": tuple(ds.edge_index),
         "adjacency": tuple(tuple(int(val) for val in row) for row in ds.adjacency) if ds.adjacency else tuple(),
         "card_wrist_index": int(card_graph_meta["wrist_index"]),
         "card_links": tuple(
             (int(pair[0]), int(pair[1])) for pair in tuple(card_graph_meta["links"])
         ),
+        "card_num_actions": int(
+            max(
+                getattr(getattr(train_loader, "dataset", None), "num_actions", 0) or 0,
+                getattr(getattr(val_loader, "dataset", None), "num_actions", 0) or 0,
+                getattr(getattr(test_loader, "dataset", None), "num_actions", 0) or 0,
+                train_cfg.card_num_actions or 1,
+            )
+        ),
+        "card_variant": str(train_cfg.card_variant),
+        "proposal_options": dict(train_cfg.proposal_options),
+        "use_lr_scheduler": bool(train_cfg.use_lr_scheduler),
+        "protocol_audit_path": str(train_cfg.protocol_audit_path),
+        "result_model_name": str(train_cfg.result_model_name),
         "early_stopping_enabled": bool(train_cfg.early_stopping_enabled),
         "early_stopping_patience": int(train_cfg.early_stopping_patience),
         "early_stopping_min_delta": float(train_cfg.early_stopping_min_delta),
         "early_stopping_warmup": int(train_cfg.early_stopping_warmup),
         "early_stopping_monitor": str(train_cfg.early_stopping_monitor),
+        "per_action_metrics_path": str(train_cfg.per_action_metrics_path),
+        "explainability_output_dir": str(train_cfg.explainability_output_dir),
+        "card_explainability_enabled": bool(train_cfg.card_explainability_enabled),
+        "card_explainability_steps": int(train_cfg.card_explainability_steps),
     }
+    if train_cfg.eval_examples_path:
+        config["eval_examples_path"] = train_cfg.eval_examples_path
+    if train_cfg.eval_examples_dir:
+        config["eval_examples_dir"] = train_cfg.eval_examples_dir
 
     if save_best_model:
         examples_models_dir = os.path.join(os.path.dirname(__file__), "examples", "models")
@@ -284,6 +306,22 @@ def run_experiment(
         ("card_mamp_motion_aware_tau", train_cfg.card_mamp_motion_aware_tau, float),
         ("card_mpjpe_weight", train_cfg.card_mpjpe_weight, float),
         ("card_coarse_target_lowpass_only", train_cfg.card_coarse_target_lowpass_only, bool),
+        ("card_use_latent_variability", train_cfg.card_use_latent_variability, bool),
+        ("card_latent_dim", train_cfg.card_latent_dim, int),
+        ("card_beta_kl", train_cfg.card_beta_kl, float),
+        ("card_kl_anneal_steps", train_cfg.card_kl_anneal_steps, int),
+        ("card_latent_encoder_hidden_dim", train_cfg.card_latent_encoder_hidden_dim, int),
+        ("card_latent_conditioning_mode", train_cfg.card_latent_conditioning_mode, str),
+        ("card_latent_baseline_pretrain_epochs", train_cfg.card_latent_baseline_pretrain_epochs, int),
+        ("card_latent_warmup_epochs", train_cfg.card_latent_warmup_epochs, int),
+        ("card_latent_joint_lr_scale", train_cfg.card_latent_joint_lr_scale, float),
+        ("card_explainable_latent_decomposition", train_cfg.card_explainable_latent_decomposition, bool),
+        ("card_latent_action_dim", train_cfg.card_latent_action_dim, int),
+        ("card_latent_style_dim", train_cfg.card_latent_style_dim, int),
+        ("card_latent_residual_dim", train_cfg.card_latent_residual_dim, int),
+        ("card_beta_action", train_cfg.card_beta_action, float),
+        ("card_beta_adversarial", train_cfg.card_beta_adversarial, float),
+        ("card_grl_anneal_steps", train_cfg.card_grl_anneal_steps, int),
         ("card_graph_laplacian_tau", train_cfg.card_graph_laplacian_tau, float),
         ("card_covariance_jitter", train_cfg.card_covariance_jitter, float),
     ]

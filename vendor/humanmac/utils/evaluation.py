@@ -14,6 +14,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 from common.metrics import humanmac_metrics, splineeqnet_diffusion_batch_eval  # type: ignore
 from common.evaluation import save_eval_samples_npz  # type: ignore
+from common.model_profiling import profile_once, profiling_pending  # type: ignore
 
 tensor = torch.tensor
 DoubleTensor = torch.DoubleTensor
@@ -40,6 +41,34 @@ def compute_stats(diffusion, multimodal_dict, model, logger, cfg):
         # traj.shape: [*, t_his + t_pre, 3 * joints_num]
 
         mode_dict, traj_dct, traj_dct_cond = sample_preprocessing(traj, cfg, mode='metrics')
+
+        if profiling_pending("humanmac_sampling"):
+            profile_mode, profile_dct, profile_dct_cond = sample_preprocessing(
+                traj[:1], cfg, mode='metrics'
+            )
+
+            def _profile_humanmac():
+                candidates = []
+                for _ in range(K):
+                    candidate = diffusion.sample_ddim(
+                        model_select,
+                        profile_dct,
+                        profile_dct_cond,
+                        profile_mode,
+                    )
+                    candidates.append(torch.matmul(cfg.idct_m_all[:, :cfg.n_pre], candidate))
+                return torch.stack(candidates, dim=0)
+
+            profile_once(
+                key="humanmac_sampling",
+                model_name="humanmac",
+                modules=[model_select],
+                sample_fn=_profile_humanmac,
+                sampling_steps=int(diffusion.ddim_timesteps),
+                batch_size=1,
+                num_candidates=K,
+                notes="K complete DDIM trajectories",
+            )
         sampled_motion = diffusion.sample_ddim(model_select,
                                                traj_dct,
                                                traj_dct_cond,
@@ -84,6 +113,7 @@ def compute_stats(diffusion, multimodal_dict, model, logger, cfg):
                 gt_future=gt_group,
                 conditioning_context=conditioning_context,
                 threshold=float(cfg.multimodal_threshold),
+                sequence_ids=multimodal_dict.get('sequence_ids'),
             )
             for stats in stats_names:
                 stats_meter[stats]['HumanMAC'].update(float(metrics[stats]), n=num_samples)
@@ -122,4 +152,3 @@ def compute_stats(diffusion, multimodal_dict, model, logger, cfg):
         df2 = pd.read_csv(file_stat % cfg.result_dir)
         df = pd.concat([df2, df1['HumanMAC']], axis=1, ignore_index=True)
         df.to_csv(file_stat % cfg.result_dir, index=False)
-

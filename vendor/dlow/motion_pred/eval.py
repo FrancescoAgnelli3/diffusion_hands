@@ -13,6 +13,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 from common.evaluation import humanmac_metrics
+from common.model_profiling import profile_once
 from motion_pred.utils.config import Config
 from motion_pred.utils.dataset_factory import get_dataset_cls
 from motion_pred.utils.visualization import render_animation
@@ -34,6 +35,37 @@ def get_prediction(data, algo, sample_num, num_seeds=1, concat_hist=True):
     X = traj[:t_his]
 
     if algo == 'dlow':
+        X_profile = X[:, :1].repeat((1, num_seeds, 1))
+
+        def _profile_dlow():
+            if sample_num == 1:
+                z_profile = torch.zeros(
+                    (X_profile.shape[1], nz), device=device, dtype=dtype
+                )
+                z_generated = models[algo].sample(
+                    X_profile, z=z_profile
+                ).view(X_profile.shape[1], nk, -1)[:, 0, :]
+                x_generated = X_profile
+            else:
+                z_generated = (
+                    models[algo]
+                    .sample(X_profile)
+                    .view(X_profile.shape[1], nk, -1)[:, :sample_num, :]
+                    .reshape(-1, nz)
+                )
+                x_generated = X_profile.repeat_interleave(sample_num, dim=1)
+            return models['vae'].decode(x_generated, z_generated)
+
+        profile_once(
+            key="dlow_cvae_sampling",
+            model_name="dlow_cvae",
+            modules=[models[algo], models["vae"]],
+            sample_fn=_profile_dlow,
+            sampling_steps=1,
+            batch_size=1,
+            num_candidates=sample_num * num_seeds,
+            notes="Single-pass DLow latent generator plus CVAE decoder",
+        )
         X = X.repeat((1, num_seeds, 1))
         if sample_num == 1:
             z = torch.zeros((X.shape[1], nz), device=device, dtype=dtype)
@@ -184,14 +216,20 @@ def compute_stats_assembly():
     stats_names = ['APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID']
     stats_meter = {x: {y: AverageMeter() for y in algos} for x in stats_names}
     humanmac_batches = {
-        algo: {'pred': [], 'gt': [], 'context': []}
+        algo: {'pred': [], 'gt': [], 'context': [], 'sequence_id': []}
         for algo in algos
     }
 
-    data_gen = dataset.iter_generator_with_scale()
+    has_sequence_ids = hasattr(dataset, 'iter_generator_with_scale_and_sequence_id')
+    data_gen = (
+        dataset.iter_generator_with_scale_and_sequence_id()
+        if has_sequence_ids else dataset.iter_generator_with_scale()
+    )
     num_samples = 0
     num_seeds = args.num_seeds
-    for data, norm_factor in data_gen:
+    for item in data_gen:
+        data, norm_factor = item[:2]
+        sequence_id = item[2] if len(item) > 2 else None
         num_samples += 1
         traj_np = data[..., 1:, :].reshape(data.shape[0], data.shape[1], -1)
         traj = tensor(traj_np, device=device, dtype=dtype).permute(1, 0, 2).contiguous()
@@ -214,6 +252,10 @@ def compute_stats_assembly():
             humanmac_batches[algo]['pred'].append(pred_candidates.detach().cpu())
             humanmac_batches[algo]['gt'].append(gt_cpu.detach().cpu())
             humanmac_batches[algo]['context'].append(conditioning_context.detach().cpu().to(dtype=torch.float32))
+            if sequence_id is not None:
+                humanmac_batches[algo]['sequence_id'].append(
+                    torch.tensor([sequence_id], dtype=torch.long)
+                )
 
         print('-' * 80)
         for stats in stats_names:
@@ -228,6 +270,8 @@ def compute_stats_assembly():
             gt_future=torch.cat(humanmac_batches[algo]['gt'], dim=0),
             conditioning_context=torch.cat(humanmac_batches[algo]['context'], dim=0),
             threshold=float(args.multimodal_threshold),
+            sequence_ids=(torch.cat(humanmac_batches[algo]['sequence_id'], dim=0)
+                          if humanmac_batches[algo]['sequence_id'] else None),
         )
         for stats in ['APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID']:
             stats_meter[stats][algo].update(metrics[stats])

@@ -26,6 +26,8 @@ def build_assembly_train_val(cfg, t_his, t_pred, train_batch_size, seed):
         if getattr(cfg, "action_filter", None) is None
         else str(cfg.action_filter)
     )
+    if action_filter.strip().lower() in {"all", "*"}:
+        action_filter = ""
     wrist_indices = tuple(int(idx) for idx in metadata.get("default_wrist_indices", (5, 26)))
 
     ds_cfg = DatasetCfg(
@@ -44,6 +46,10 @@ def build_assembly_train_val(cfg, t_his, t_pred, train_batch_size, seed):
         node_count=int(metadata.get("node_count", 21)),
         edge_index=tuple(metadata.get("edge_index", ())),
         adjacency=tuple(metadata.get("adjacency", ())),
+        max_source_files=max(0, int(getattr(cfg, "max_source_files", 0))),
+        balanced_action_sampling=bool(getattr(cfg, "balanced_action_sampling", False)),
+        use_official_splits=bool(getattr(cfg, "use_official_splits", False)),
+        include_action_labels=True,
     )
 
     train_dataset, val_dataset, test_dataset = build_datasets(ds_cfg)

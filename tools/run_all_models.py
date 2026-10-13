@@ -3,7 +3,9 @@ import argparse
 import csv
 import glob
 import json
+import math
 import os
+import statistics
 import subprocess
 import sys
 import time
@@ -38,7 +40,14 @@ DEFAULT_DATA_ROOTS: Dict[str, str] = {
 DEFAULT_RUNTIME: Dict[str, str] = {
     "output_root": str(ROOT / "results"),
     "aggregate_csv": str(ROOT / "results" / "all_models_metrics_long.csv"),
+    "summary_csv": str(ROOT / "results" / "all_models_metrics_summary.csv"),
 }
+
+# Slightly widen the automatically calibrated cross-sequence neighbourhood.
+# This is intentionally a code-level constant: no experiment YAML key is needed.
+# The raw calibration threshold is kept in the manifest; models receive the
+# scaled threshold returned by _resolve_multimodal_threshold().
+AUTO_MULTIMODAL_THRESHOLD_SCALE = 1.10
 
 
 def _now() -> str:
@@ -67,8 +76,18 @@ def _deep_merge_dicts(base: dict, override: dict) -> dict:
     return merged
 
 
-def _run(cmd: List[str], cwd: Path, env: Optional[dict] = None) -> int:
+def _run(cmd: List[str], cwd: Path, env: Optional[dict] = None, log_path: Optional[str] = None) -> int:
     print(f"[CMD] ({cwd}) {' '.join(cmd)}")
+    if log_path:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "w", encoding="utf-8") as log:
+            with subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, bufsize=1) as process:
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    log.write(line)
+                    log.flush()
+                return int(process.wait())
     p = subprocess.run(cmd, cwd=str(cwd), env=env)
     return int(p.returncode)
 
@@ -80,6 +99,12 @@ def _gpu_subprocess_env(cfg: dict) -> dict:
         # Restrict each launched backend to a single physical GPU so vendor-specific
         # device selection code cannot accidentally fall back to GPU 0.
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+    max_source_files = int(_as_dict(cfg.get("shared_defaults")).get("max_source_files", 0))
+    if max_source_files > 0:
+        # Every backend ultimately uses SplineEqNet's shared dataset builder.
+        # Carry the sample cap out-of-band as well as in generated configs so
+        # vendor adapters cannot accidentally omit it.
+        env["DIFFUSION_HANDS_MAX_SOURCE_FILES"] = str(max_source_files)
     return env
 
 
@@ -229,6 +254,139 @@ def _append_long_csv(path: Path, row: Dict[str, object]) -> None:
         w.writerow(serialized)
 
 
+def _long_row_key(row: Dict[str, object]) -> Tuple[str, str, int, str]:
+    return (
+        str(row.get("dataset", "")),
+        str(row.get("action_filter", "")),
+        int(row.get("seed", 0)),
+        str(row.get("model", "")),
+    )
+
+
+def _read_long_csv(path: Path) -> List[Dict[str, str]]:
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        return [dict(row) for row in csv.DictReader(f)]
+
+
+def _upsert_long_csv(path: Path, row: Dict[str, object]) -> List[Dict[str, object]]:
+    """Replace a previous model/seed row instead of appending duplicates."""
+    rows: List[Dict[str, object]] = [dict(item) for item in _read_long_csv(path)]
+    key = _long_row_key(row)
+    rows = [item for item in rows if _long_row_key(item) != key]
+    rows.append(dict(row))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CANONICAL_LONG_HEADER)
+        writer.writeheader()
+        for item in rows:
+            serialized: Dict[str, object] = {}
+            for field in CANONICAL_LONG_HEADER:
+                value = item.get(field, "")
+                if field in {"APD", "ADE", "FDE", "MMADE", "MMFDE", "CMD", "FID"}:
+                    try:
+                        if value not in (None, ""):
+                            value = f"{float(value):.3f}"
+                    except (TypeError, ValueError):
+                        pass
+                serialized[field] = value
+            writer.writerow(serialized)
+    return rows
+
+
+def _resolve_seeds(cfg: dict) -> List[int]:
+    raw = cfg.get("seeds")
+    if raw is None:
+        raw = [cfg.get("seed", 0)]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("'seeds' must be a non-empty list of unique integers.")
+    try:
+        seeds = [int(seed) for seed in raw]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("'seeds' must contain only integers.") from exc
+    if len(seeds) != len(set(seeds)):
+        raise ValueError("'seeds' must contain unique values.")
+    return seeds
+
+
+def _data_seed(cfg: dict) -> int:
+    return int(cfg.get("data_seed", cfg.get("seed", 0)))
+
+
+def _write_summary_csv(path: Path, rows: List[Dict[str, object]], seeds: List[int]) -> None:
+    """Write one mean/std row per dataset/action/model for complete seed cohorts."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    metric_fields = [
+        field
+        for metric in CANONICAL_METRIC_KEYS
+        for field in (f"{metric}_mean", f"{metric}_std")
+    ]
+    header = [
+        "dataset",
+        "action_filter",
+        "model",
+        "successful_seeds",
+        "n",
+        "expected_n",
+        "complete",
+        *metric_fields,
+        "notes",
+    ]
+    groups: Dict[Tuple[str, str, str], List[Dict[str, object]]] = {}
+    for row in rows:
+        key = (str(row["dataset"]), str(row["action_filter"]), str(row["model"]))
+        groups.setdefault(key, []).append(row)
+
+    summary_rows: List[Dict[str, object]] = []
+    expected = set(seeds)
+    for (dataset, action_filter, model), group in sorted(groups.items()):
+        successful = {
+            int(row["seed"]): row
+            for row in group
+            if row.get("status") == "ok" and int(row["seed"]) in expected
+        }
+        cohort_complete = set(successful) == expected
+        output: Dict[str, object] = {
+            "dataset": dataset,
+            "action_filter": action_filter,
+            "model": model,
+            "successful_seeds": ";".join(str(seed) for seed in seeds if seed in successful),
+            "n": len(successful),
+            "expected_n": len(seeds),
+            "complete": cohort_complete,
+            "notes": next((str(row.get("notes", "")) for row in group if row.get("notes")), ""),
+        }
+        all_metrics_complete = cohort_complete
+        for metric in CANONICAL_METRIC_KEYS:
+            values: List[float] = []
+            if cohort_complete:
+                for seed in seeds:
+                    try:
+                        value = float(successful[seed][metric])
+                    except (KeyError, TypeError, ValueError):
+                        values = []
+                        break
+                    if not math.isfinite(value):
+                        values = []
+                        break
+                    values.append(value)
+            if len(values) == len(seeds):
+                output[f"{metric}_mean"] = f"{statistics.mean(values):.6f}"
+                output[f"{metric}_std"] = f"{statistics.stdev(values):.6f}" if len(values) > 1 else "0.000000"
+            else:
+                all_metrics_complete = False
+                output[f"{metric}_mean"] = ""
+                output[f"{metric}_std"] = ""
+        output["complete"] = all_metrics_complete
+        summary_rows.append(output)
+
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+
 def _as_dict(obj: object) -> Dict[str, object]:
     return dict(obj) if isinstance(obj, dict) else {}
 
@@ -339,8 +497,27 @@ def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
     if not best_cfg:
         raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
     best_cfg["model"] = target_model
+    if target_model == "card":
+        best_cfg["card_variant"] = base_model
+    best_cfg["result_model_name"] = model_name
+    best_cfg["data_seed"] = _data_seed(cfg)
     best_cfg["input_n"] = int(pp["input_n"])
     best_cfg["output_n"] = int(pp["output_n"])
+    # CARD-family models use a low-frequency DCT subspace.  The configured
+    # default (80) is valid for the 100-frame baseline, but not for shorter
+    # horizon-suite windows. Reserve ten coefficients for the high-frequency
+    # diffusion stage and make the effective value explicit in the child
+    # config instead of failing deep inside the model constructor.
+    total_frames = int(pp["input_n"]) + int(pp["output_n"])
+    reserve = max(1, int(cfg.get("card_k_low_reserve", 10)))
+    max_k_low = max(1, total_frames - reserve)
+    configured_k_low = int(best_cfg.get("card_k_low", max_k_low))
+    if configured_k_low > max_k_low:
+        print(
+            f"[{model_name}] card_k_low={configured_k_low} exceeds total_frames={total_frames}; "
+            f"using card_k_low={max_k_low}"
+        )
+        best_cfg["card_k_low"] = max_k_low
     best_cfg["stride"] = int(pp["stride"])
     best_cfg["time_interp"] = pp.get("time_interp")
     best_cfg["window_norm"] = pp.get("window_norm")
@@ -372,6 +549,32 @@ def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
         best_json = run_root / "card_best_config.json"
         out_eval_base = run_root / "card_eval.csv"
         save_root = run_root / "checkpoints"
+        per_action_cfg = _as_dict(cfg.get("runtime")).get(
+            "per_action_csv", "./results/all_models_by_action.csv"
+        )
+        per_action_path = Path(str(per_action_cfg))
+        if not per_action_path.is_absolute():
+            per_action_path = ROOT / per_action_path
+        best_cfg["per_action_metrics_path"] = str(per_action_path)
+        if samples_root is not None:
+            best_cfg["explainability_output_dir"] = str(samples_root / "explainability")
+        # ``train_best_models.py`` parses this argument as a float.  Most
+        # orchestrated runs resolve ``auto`` once per action before reaching
+        # this function, but keep direct callers safe as well.
+        threshold = cfg.get("humanmac_multimodal_threshold", 0.5)
+        if isinstance(threshold, str) and threshold.strip().lower() == "auto":
+            runtime_cfg = _as_dict(cfg.get("runtime"))
+            per_action = Path(str(runtime_cfg.get(
+                "per_action_csv", ROOT / "results" / "all_models_by_action.csv"
+            )))
+            if not per_action.is_absolute():
+                per_action = ROOT / per_action
+            threshold, _ = _resolve_multimodal_threshold(
+                cfg, dataset=dataset, data_dir=data_dir,
+                action_filter=action_filter, run_id=run_id,
+                out_root=per_action.parent,
+            )
+        best_cfg["humanmac_multimodal_threshold"] = float(threshold)
         with open(best_json, "w", encoding="utf-8") as f:
             json.dump({"card": best_cfg}, f, indent=2)
         rc = _run(
@@ -387,7 +590,7 @@ def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
                 "--action-filter",
                 str(action_filter),
                 "--eval-split",
-                "test",
+                str(cfg.get("evaluation_split", "test")),
                 "--seed",
                 str(cfg["seed"]),
                 "--window",
@@ -413,11 +616,14 @@ def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
             ],
             cwd=wd,
             env=_gpu_subprocess_env(cfg),
+            log_path=_as_dict(cfg.get("runtime")).get("log_path"),
         )
         if rc != 0:
-            raise RuntimeError(f"{target_model} training failed")
+            raise RuntimeError(
+                f"{model_name} training failed (backend={target_model})"
+            )
 
-        out_candidates = sorted(run_root.glob("**/*.csv"), key=os.path.getmtime)
+        out_candidates = sorted(run_root.glob("**/card_eval*_w*_h*.csv"), key=os.path.getmtime)
         if not out_candidates:
             raise RuntimeError(f"{target_model} did not produce any metrics CSV under {run_root}")
         row = read_one_row_csv(out_candidates[-1])
@@ -519,9 +725,16 @@ def run_comusion(model_name: str, dataset: str, data_dir: Path, action_filter: s
         raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
     template["t_his"] = int(pp["input_n"])
     template["t_pred"] = int(pp["output_n"])
+    # CoMusion's DCT basis must not exceed the temporal length available to
+    # the current experiment.  Infer it from the shared preprocessing so a
+    # 30+10 window uses dct_dim=40, while the 50+50 benchmark uses 100.
+    total_frames = int(pp["input_n"]) + int(pp["output_n"])
+    template.setdefault("model_specs", {})["dct_dim"] = total_frames
     template["data_specs"]["dataset"] = str(dataset).lower()
     template["data_specs"]["data_dir"] = str(data_dir)
-    template["data_specs"]["action_filter"] = str(action_filter)
+    template["data_specs"]["action_filter"] = (
+        "" if str(action_filter).strip().lower() in {"all", "*"} else str(action_filter)
+    )
     template["data_specs"]["stride"] = int(pp["stride"])
     template["data_specs"]["time_interp"] = pp.get("time_interp")
     template["data_specs"]["window_norm"] = pp.get("window_norm")
@@ -558,6 +771,14 @@ def run_comusion(model_name: str, dataset: str, data_dir: Path, action_filter: s
     template["logging_specs"]["model_id"] = cfg_id
     template["logging_specs"]["model_path"] = f"./results/{cfg_id}"
     template["logging_specs"]["final_checkpoint_path"] = str(checkpoint_dir / "final.pt") if checkpoint_dir is not None else ""
+    per_action_cfg = _as_dict(cfg.get("runtime")).get(
+        "per_action_csv", "./results/all_models_by_action.csv"
+    )
+    per_action_path = Path(str(per_action_cfg))
+    if not per_action_path.is_absolute():
+        per_action_path = ROOT / per_action_path
+    template["logging_specs"]["per_action_metrics_path"] = str(per_action_path)
+    template["logging_specs"]["result_model_name"] = str(model_name)
     if run_root is not None:
         template["eval_samples_path"] = str(run_root / "eval_samples.npz")
     _dump_yaml(cfg_path, template)
@@ -745,7 +966,7 @@ def run_humanmac(model_name: str, dataset: str, data_dir: Path, action_filter: s
             "--seed",
             str(cfg["seed"]),
             "--split_seed",
-            str(cfg["seed"]),
+            str(_data_seed(cfg)),
             "--num_candidates",
             str(cfg["num_candidates"]),
             "--multimodal_threshold",
@@ -1106,7 +1327,10 @@ def _resolve_action_filters(cfg: dict, dataset: str) -> List[str]:
             raise ValueError("'action_filter' list must contain at least one non-empty action.")
     else:
         configured_action_filter = "" if raw is None else str(raw).strip()
-        out = [default_action_filter(dataset, configured_action_filter)]
+        if configured_action_filter.lower() in {"all", "*"}:
+            out = ["all"]
+        else:
+            out = [default_action_filter(dataset, configured_action_filter)]
 
     deduped: List[str] = []
     seen = set()
@@ -1123,6 +1347,70 @@ def _cleanup_legacy_result_artifacts(out_root: Path) -> None:
     for p in out_root.glob("skeletondiffusion_*"):
         if p.is_dir():
             shutil.rmtree(p, ignore_errors=True)
+
+
+def _resolve_multimodal_threshold(
+    cfg: dict,
+    *,
+    dataset: str,
+    data_dir: Path,
+    action_filter: str,
+    run_id: str,
+    out_root: Path,
+) -> Tuple[float, Optional[Path]]:
+    configured = cfg.get("humanmac_multimodal_threshold", 0.5)
+    if not (isinstance(configured, str) and configured.strip().lower() == "auto"):
+        threshold = float(configured)
+        if threshold <= 0:
+            raise ValueError("humanmac_multimodal_threshold must be positive or 'auto'")
+        return threshold, None
+
+    calibration = _as_dict(cfg.get("humanmac_multimodal_calibration"))
+    pp = _as_dict(cfg.get("_shared_preprocessing"))
+    output_path = out_root / "multimodal_calibration" / f"{run_id}.json"
+    cmd = [
+        PYTHON,
+        str(ROOT / "tools" / "calibrate_multimodal_threshold.py"),
+        "--dataset", dataset,
+        "--data-dir", str(data_dir),
+        "--action-filter", action_filter,
+        "--input-n", str(int(pp["input_n"])),
+        "--output-n", str(int(pp["output_n"])),
+        "--stride", str(int(pp["stride"])),
+        "--data-seed", str(int(cfg.get("data_seed", 0) or 0)),
+        "--max-source-files", str(int(_as_dict(cfg.get("shared_defaults")).get("max_source_files", 0))),
+        "--k", str(int(calibration.get("k", 5))),
+        "--max-samples", str(int(calibration.get("max_samples", 4096))),
+        "--chunk-size", str(int(calibration.get("chunk_size", 128))),
+        "--output", str(output_path),
+    ]
+    if pp.get("time_interp") is not None:
+        cmd.extend(["--time-interp", str(int(pp["time_interp"]))])
+    if pp.get("window_norm") is not None:
+        cmd.extend(["--window-norm", str(int(pp["window_norm"]))])
+    shared_defaults = _as_dict(cfg.get("shared_defaults"))
+    if bool(shared_defaults.get("balanced_action_sampling", False)):
+        cmd.append("--balanced-action-sampling")
+    if bool(shared_defaults.get("use_official_splits", False)):
+        cmd.append("--use-official-splits")
+
+    rc = _run(cmd, cwd=ROOT, env=_gpu_subprocess_env(cfg))
+    if rc != 0:
+        raise RuntimeError("automatic multimodal-threshold calibration failed")
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    raw_threshold = float(payload["threshold"])
+    threshold = raw_threshold * AUTO_MULTIMODAL_THRESHOLD_SCALE
+    payload["raw_threshold"] = raw_threshold
+    payload["threshold_scale"] = AUTO_MULTIMODAL_THRESHOLD_SCALE
+    payload["effective_threshold"] = threshold
+    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"[MULTIMODAL CALIBRATION] raw_threshold={raw_threshold:.6g} "
+        f"scale={AUTO_MULTIMODAL_THRESHOLD_SCALE:.3g} "
+        f"effective_threshold={threshold:.6g} "
+        f"k={payload['k']} samples={payload['num_samples']} manifest={output_path}"
+    )
+    return threshold, output_path
 
 
 def main() -> None:
@@ -1146,13 +1434,27 @@ def main() -> None:
     runtime = _resolve_runtime(cfg)
     out_root = Path(runtime["output_root"])
     aggregate_csv = Path(runtime["aggregate_csv"])
+    summary_csv = Path(runtime["summary_csv"])
+    seeds = _resolve_seeds(cfg)
+    # Resume from any existing aggregate: successful rows are immutable and
+    # skipped; failed rows are rerun and replaced in-place.
+    invocation_rows: List[Dict[str, object]] = [dict(row) for row in _read_long_csv(aggregate_csv)]
+    existing_rows = {
+        _long_row_key(row): row
+        for row in invocation_rows
+    }
+    had_failures = False
 
     out_root.mkdir(parents=True, exist_ok=True)
     _cleanup_legacy_result_artifacts(out_root)
+    _write_summary_csv(summary_csv, invocation_rows, seeds)
     print(f"[PREPROCESSING] shared={cfg['_shared_preprocessing']}")
 
     runners = {
         "card": run_card,
+        "star_hand": run_card,
+        "fihard": run_card,
+        "cit": run_card,
         "simlpe_dct": run_card,
         "belfusion": run_belfusion,
         "comusion": run_comusion,
@@ -1164,11 +1466,25 @@ def main() -> None:
     for dataset in datasets:
         data_dir = Path(data_roots[dataset])
         for action_filter in _resolve_action_filters(cfg, dataset):
-            run_id = f"{dataset}_{action_filter or 'all'}_{_now()}"
+            cohort_id = f"{dataset}_{action_filter or 'all'}_{_now()}"
 
-            print(f"[DATASET] starting dataset={dataset} action_filter={action_filter!r} data_dir={data_dir}")
+            threshold, _calibration_manifest = _resolve_multimodal_threshold(
+                cfg,
+                dataset=dataset,
+                data_dir=data_dir,
+                action_filter=action_filter,
+                run_id=cohort_id,
+                out_root=out_root,
+            )
+            dataset_cfg = deepcopy(cfg)
+            dataset_cfg["humanmac_multimodal_threshold"] = threshold
 
-            for model_name, model_cfg in cfg.get("models", {}).items():
+            print(
+                f"[DATASET] starting dataset={dataset} action_filter={action_filter!r} "
+                f"data_dir={data_dir} humanmac_threshold={threshold:.6g}"
+            )
+
+            for model_name, model_cfg in dataset_cfg.get("models", {}).items():
                 if not bool(model_cfg.get("enabled", False)):
                     continue
                 base_model = str(model_cfg.get("base_model", model_name)).strip().lower()
@@ -1178,27 +1494,47 @@ def main() -> None:
                         f"Unsupported base_model '{base_model}' for models.{model_name}. "
                         f"Supported models: {sorted(runners)}"
                     )
-                row: Dict[str, object] = {
-                    "timestamp": _now(),
-                    "dataset": dataset,
-                    "action_filter": action_filter,
-                    "model": model_name,
-                    "status": "ok",
-                    "notes": str(model_cfg.get("notes", "") or ""),
-                    **{k: float("nan") for k in CANONICAL_METRIC_KEYS},
-                }
-                try:
-                    metrics = fn(model_name, dataset, data_dir, action_filter, cfg, run_id)
-                    row.update(metrics)
-                    print(f"[{dataset}:{model_name}] metrics={metrics}")
-                except Exception as exc:
-                    row["status"] = "failed"
-                    prefix = str(model_cfg.get("notes", "") or "").strip()
-                    row["notes"] = f"{prefix} | {exc}" if prefix else str(exc)
-                    print(f"[{dataset}:{model_name}] FAILED: {exc}")
-                _append_long_csv(aggregate_csv, row)
+                for seed in seeds:
+                    row_key = (str(dataset), str(action_filter), int(seed), str(model_name))
+                    previous = existing_rows.get(row_key)
+                    if previous is not None and str(previous.get("status", "")).lower() == "ok":
+                        print(
+                            f"[{dataset}:{model_name}:seed={seed}] SKIP existing successful run",
+                            flush=True,
+                        )
+                        continue
+
+                    seed_cfg = deepcopy(dataset_cfg)
+                    seed_cfg["seed"] = seed
+                    run_id = f"{cohort_id}_{model_name}_seed{seed}"
+                    row: Dict[str, object] = {
+                        "timestamp": _now(),
+                        "dataset": dataset,
+                        "action_filter": action_filter,
+                        "seed": seed,
+                        "model": model_name,
+                        "status": "ok",
+                        "notes": str(model_cfg.get("notes", "") or ""),
+                        **{k: float("nan") for k in CANONICAL_METRIC_KEYS},
+                    }
+                    try:
+                        metrics = fn(model_name, dataset, data_dir, action_filter, seed_cfg, run_id)
+                        row.update(metrics)
+                        print(f"[{dataset}:{model_name}:seed={seed}] metrics={metrics}")
+                    except Exception as exc:
+                        had_failures = True
+                        row["status"] = "failed"
+                        prefix = str(model_cfg.get("notes", "") or "").strip()
+                        row["notes"] = f"{prefix} | {exc}" if prefix else str(exc)
+                        print(f"[{dataset}:{model_name}:seed={seed}] FAILED: {exc}")
+                    invocation_rows = _upsert_long_csv(aggregate_csv, row)
+                    existing_rows[row_key] = row
+                    _write_summary_csv(summary_csv, invocation_rows, seeds)
 
     print(f"[DONE] aggregate metrics csv: {aggregate_csv}")
+    print(f"[DONE] three-seed mean/std csv: {summary_csv}")
+    if had_failures:
+        raise SystemExit("One or more runs failed; incomplete cohorts were not averaged.")
 
 
 if __name__ == "__main__":

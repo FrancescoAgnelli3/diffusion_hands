@@ -303,6 +303,7 @@ def humanmac_metrics(
     *,
     threshold: float = 0.5,
     start_pose: Optional[torch.Tensor] = None,
+    sequence_ids: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     conditioning_context = _resolve_conditioning_context(
         conditioning_context,
@@ -324,19 +325,28 @@ def humanmac_metrics(
     ).cpu()
     gt_flat = gt_future.reshape(gt_future.shape[0], gt_future.shape[1], -1).cpu()
     context_flat = conditioning_context.reshape(conditioning_context.shape[0], -1).cpu()
+    if sequence_ids is not None:
+        sequence_ids = torch.as_tensor(sequence_ids).reshape(-1).cpu()
+        if sequence_ids.numel() != gt_flat.shape[0]:
+            raise ValueError("sequence_ids must contain one id per evaluated sample")
 
     pairwise = torch.cdist(context_flat, context_flat)
+    neighbor_mask = pairwise < float(threshold)
+    neighbor_mask.fill_diagonal_(False)
+    if sequence_ids is not None:
+        neighbor_mask &= sequence_ids[:, None] != sequence_ids[None, :]
     apd_total = 0.0
     ade_total = 0.0
     fde_total = 0.0
     mmade_total = 0.0
     mmfde_total = 0.0
+    multimodal_samples = 0
     num_samples = int(gt_flat.shape[0])
 
     for sample_idx in range(num_samples):
         pred_sample = pred_flat[:, sample_idx, :, :]
         gt_sample = gt_flat[sample_idx : sample_idx + 1]
-        group_idx = torch.nonzero(pairwise[sample_idx] < float(threshold), as_tuple=False).view(-1)
+        group_idx = torch.nonzero(neighbor_mask[sample_idx], as_tuple=False).view(-1)
         gt_multi = gt_flat[group_idx]
 
         if pred_sample.shape[0] <= 1:
@@ -344,27 +354,30 @@ def humanmac_metrics(
         else:
             apd_val = torch.pdist(pred_sample.reshape(pred_sample.shape[0], -1)).mean()
 
-        gt_multi_gt = torch.cat([gt_multi, gt_sample], dim=0)
-        dist = torch.linalg.norm(pred_sample[:, None, :, :] - gt_multi_gt[None, :, :, :], dim=3)
-
-        mmfde_val = dist[:, :-1, -1].min(dim=0).values.mean()
-        mmade_val = dist[:, :-1].mean(dim=2).min(dim=0).values.mean()
-        ade_val = dist[:, -1].mean(dim=1).min(dim=0).values.mean()
-        fde_val = dist[:, -1, -1].min(dim=0).values.mean()
+        target_dist = torch.linalg.norm(pred_sample - gt_sample, dim=2)
+        ade_val = target_dist.mean(dim=1).min(dim=0).values
+        fde_val = target_dist[:, -1].min(dim=0).values
 
         apd_total += float(apd_val.item())
         ade_total += float(ade_val.item())
         fde_total += float(fde_val.item())
-        mmade_total += float(mmade_val.item())
-        mmfde_total += float(mmfde_val.item())
+        if group_idx.numel():
+            multimodal_dist = torch.linalg.norm(
+                pred_sample[:, None, :, :] - gt_multi[None, :, :, :], dim=3
+            )
+            mmade_val = multimodal_dist.mean(dim=2).min(dim=0).values.mean()
+            mmfde_val = multimodal_dist[:, :, -1].min(dim=0).values.mean()
+            mmade_total += float(mmade_val.item())
+            mmfde_total += float(mmfde_val.item())
+            multimodal_samples += 1
 
     denom = max(1, num_samples)
     out = {
         "APD": apd_total / denom,
         "ADE": ade_total / denom,
         "FDE": fde_total / denom,
-        "MMADE": mmade_total / denom,
-        "MMFDE": mmfde_total / denom,
+        "MMADE": mmade_total / multimodal_samples if multimodal_samples else float("nan"),
+        "MMFDE": mmfde_total / multimodal_samples if multimodal_samples else float("nan"),
     }
     out.update(distributional_motion_metrics(pred_candidates, gt_future))
     return out
@@ -377,6 +390,7 @@ def humanmac_metrics_prefixed(
     *,
     threshold: float = 0.5,
     start_pose: Optional[torch.Tensor] = None,
+    sequence_ids: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     m = humanmac_metrics(
         pred_candidates,
@@ -384,6 +398,7 @@ def humanmac_metrics_prefixed(
         conditioning_context,
         threshold=threshold,
         start_pose=start_pose,
+        sequence_ids=sequence_ids,
     )
     return {
         "humanmac_apd": m["APD"],
@@ -404,6 +419,7 @@ def splineeqnet_diffusion_batch_eval(
     *,
     threshold: float = 0.5,
     start_pose: Optional[torch.Tensor] = None,
+    sequence_ids: Optional[torch.Tensor] = None,
 ) -> Dict[str, Union[torch.Tensor, Dict[str, float]]]:
     conditioning_context = _resolve_conditioning_context(
         conditioning_context,
@@ -422,7 +438,13 @@ def splineeqnet_diffusion_batch_eval(
     pred_bktn3 = pred_bktc.reshape(b, k, t, n, 3)
     gt_btn3 = gt_future.reshape(b, t, n, 3)
 
-    humanmac = humanmac_metrics(pred_candidates, gt_future, conditioning_context, threshold=threshold)
+    humanmac = humanmac_metrics(
+        pred_candidates,
+        gt_future,
+        conditioning_context,
+        threshold=threshold,
+        sequence_ids=sequence_ids,
+    )
     return {
         "humanmac": humanmac,
     }

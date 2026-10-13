@@ -1,5 +1,6 @@
 import glob
 import os
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
@@ -22,6 +23,10 @@ from common.dataset_graphs import (
     H2O_HAND_GROUPS,
     resolve_local_hand_graph_metadata,
 )
+
+
+_ASSEMBLY_ACTION_RE = re.compile(r"_lenRGB\d+_(?P<action>.+)$")
+_ASSEMBLY_SPLIT_RE = re.compile(r"^(?P<split>tr|va|te)\d+_")
 
 
 DATASET_METADATA: Dict[str, Dict[str, Any]] = {
@@ -72,6 +77,86 @@ def resolve_card_hand_graph_metadata(
     wrist_indices: Tuple[int, ...] = tuple(),
 ) -> Dict[str, Any]:
     return dict(resolve_local_hand_graph_metadata(dataset, wrist_indices))
+
+
+def extract_action_name_from_filename(file_path: str, dataset: str, action_filter: str = "") -> str:
+    base = os.path.splitext(os.path.basename(file_path))[0]
+    dataset_lower = str(dataset).lower()
+    if dataset_lower == "assembly":
+        match = _ASSEMBLY_ACTION_RE.search(base)
+        if match:
+            return match.group("action")
+    if action_filter:
+        return str(action_filter)
+    return "unknown"
+
+
+def extract_assembly_split_from_filename(file_path: str) -> str:
+    base = os.path.basename(file_path)
+    match = _ASSEMBLY_SPLIT_RE.match(base)
+    if not match:
+        raise ValueError(f"AssemblyHands filename has no official tr/va/te prefix: {base!r}")
+    return {"tr": "train", "va": "val", "te": "test"}[match.group("split")]
+
+
+def select_balanced_action_files(
+    files: List[str],
+    *,
+    dataset: str,
+    max_files: int,
+    seed: int,
+    preserve_official_splits: bool,
+) -> List[str]:
+    """Deterministically round-robin a global source-file budget across actions."""
+    ordered = sorted(str(path) for path in files)
+    if max_files <= 0 or len(ordered) <= max_files:
+        return ordered
+
+    rng = np.random.RandomState(int(seed))
+    by_action: Dict[str, List[str]] = {}
+    for path in ordered:
+        action = extract_action_name_from_filename(path, dataset, action_filter="")
+        by_action.setdefault(action, []).append(path)
+
+    selected: List[str] = []
+    remaining: Dict[str, List[str]] = {}
+    for action in sorted(by_action):
+        paths = list(by_action[action])
+        rng.shuffle(paths)
+        reserved: List[str] = []
+        if preserve_official_splits and str(dataset).lower() == "assembly":
+            for split in ("train", "val", "test"):
+                candidate = next(
+                    (p for p in paths if extract_assembly_split_from_filename(p) == split),
+                    None,
+                )
+                if candidate is not None:
+                    reserved.append(candidate)
+                    paths.remove(candidate)
+        elif paths:
+            reserved.append(paths.pop())
+        selected.extend(reserved)
+        remaining[action] = paths
+
+    if len(selected) > int(max_files):
+        raise ValueError(
+            f"max_source_files={max_files} is too small to retain split coverage for "
+            f"{len(by_action)} actions (requires at least {len(selected)} files)."
+        )
+
+    actions = sorted(remaining)
+    while len(selected) < int(max_files):
+        progressed = False
+        for action in actions:
+            bucket = remaining[action]
+            if bucket:
+                selected.append(bucket.pop())
+                progressed = True
+                if len(selected) >= int(max_files):
+                    break
+        if not progressed:
+            break
+    return sorted(selected)
 
 
 # ----------------------------
@@ -355,11 +440,13 @@ def collect_sequences_from_files_wrist_centered(
     node_count: int,
     hand_groups: Tuple[dict, ...],
     dataset: str,
+    action_to_id: Optional[Dict[str, int]] = None,
+    action_filter: str = "",
     time_interp: Optional[int] = None,
     window_norm: Optional[int] = None,
     split_hands: bool = True,
-) -> List[Tuple[np.ndarray, float]]:
-    loaded: List[Tuple[np.ndarray, float]] = []
+) -> List[Tuple[Any, ...]]:
+    loaded: List[Tuple[np.ndarray, float, Optional[int]]] = []
     for f in tqdm(files):
         try:
             per_hand = calculate_embedding_wrist_centered_split_canonical(
@@ -373,16 +460,23 @@ def collect_sequences_from_files_wrist_centered(
             )
             if per_hand is None:
                 continue
+            action_id = None
+            if action_to_id is not None:
+                action_name = extract_action_name_from_filename(f, dataset, action_filter=action_filter)
+                action_id = int(action_to_id.get(action_name, action_to_id.get("unknown", 0)))
             for coords, norm_factor in per_hand:
-                loaded.append((coords, norm_factor))
+                loaded.append((coords, norm_factor, action_id))
         except Exception:
             pass
 
-    seqs: List[Tuple[np.ndarray, float]] = []
-    for coords, norm_factor in loaded:
+    seqs = []
+    for coords, norm_factor, action_id in loaded:
         feats = calculate_features(coords)
         if feats.shape[0] >= 4:
-            seqs.append((feats, norm_factor))
+            if action_id is None:
+                seqs.append((feats, norm_factor))
+            else:
+                seqs.append((feats, norm_factor, int(action_id)))
     return seqs
 
 
@@ -408,7 +502,8 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
     else:
         hand_groups = base_hand_groups
 
-    rng = np.random.RandomState(ds_cfg.seed)
+    data_seed = ds_cfg.seed if ds_cfg.data_seed is None else int(ds_cfg.data_seed)
+    rng = np.random.RandomState(data_seed)
     if ds_cfg.subset_files is not None:
         files = list(ds_cfg.subset_files)
     else:
@@ -420,39 +515,77 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
     if not files:
         raise SystemExit("No files found for dataset configuration.")
 
+    configured_max_source_files = max(0, int(getattr(ds_cfg, "max_source_files", 0)))
+    env_max_source_files = os.environ.get("DIFFUSION_HANDS_MAX_SOURCE_FILES")
+    if env_max_source_files is not None:
+        try:
+            max_source_files = int(env_max_source_files)
+        except ValueError as exc:
+            raise ValueError(
+                "DIFFUSION_HANDS_MAX_SOURCE_FILES must be an integer"
+            ) from exc
+        if max_source_files <= 0:
+            raise ValueError("DIFFUSION_HANDS_MAX_SOURCE_FILES must be > 0")
+    else:
+        max_source_files = configured_max_source_files
+    if max_source_files > 0 and len(files) > max_source_files:
+        if bool(getattr(ds_cfg, "balanced_action_sampling", False)):
+            files = select_balanced_action_files(
+                files,
+                dataset=ds_cfg.dataset,
+                max_files=max_source_files,
+                seed=data_seed,
+                preserve_official_splits=bool(getattr(ds_cfg, "use_official_splits", False)),
+            )
+        else:
+            chosen = rng.choice(len(files), size=max_source_files, replace=False)
+            files = sorted(files[int(i)] for i in chosen)
+        print(
+            f"Selected {len(files)} source files (cap={max_source_files}, "
+            f"balanced={bool(getattr(ds_cfg, 'balanced_action_sampling', False))})."
+        )
+
+    include_action_labels = bool(getattr(ds_cfg, "include_action_labels", False))
+    action_to_id: Optional[Dict[str, int]] = None
+    if include_action_labels:
+        action_names = [
+            extract_action_name_from_filename(f, ds_cfg.dataset, action_filter=ds_cfg.action_filter)
+            for f in files
+        ]
+        action_to_id = {name: idx for idx, name in enumerate(sorted(set(action_names)))}
+        if "unknown" not in action_to_id and not action_to_id:
+            action_to_id = {"unknown": 0}
+
     n_total = len(files)
     if n_total < 3:
         raise SystemExit("At least three sequence files are required to create train/val/test splits.")
 
-    idx = np.arange(len(files))
-    rng.shuffle(idx)
-    files = [files[i] for i in idx]
-
-    test_fraction = 0.2
-    val_fraction = 0.1
-    n_test = max(1, int(round(test_fraction * n_total)))
-    n_val = max(1, int(round(val_fraction * n_total)))
-    n_train = n_total - n_test - n_val
-    if n_train < 1:
-        deficit = 1 - n_train
-        reducible_val = max(0, n_val - 1)
-        take_val = min(deficit, reducible_val)
-        n_val -= take_val
-        deficit -= take_val
-        if deficit > 0:
-            reducible_test = max(0, n_test - 1)
-            take_test = min(deficit, reducible_test)
-            n_test -= take_test
-            deficit -= take_test
+    if bool(getattr(ds_cfg, "use_official_splits", False)):
+        if str(ds_cfg.dataset).lower() != "assembly":
+            raise ValueError("use_official_splits is currently supported only for AssemblyHands.")
+        train_files = [f for f in files if extract_assembly_split_from_filename(f) == "train"]
+        val_files = [f for f in files if extract_assembly_split_from_filename(f) == "val"]
+        test_files = [f for f in files if extract_assembly_split_from_filename(f) == "test"]
+    else:
+        idx = np.arange(len(files))
+        rng.shuffle(idx)
+        files = [files[i] for i in idx]
+        test_fraction = 0.2
+        val_fraction = 0.1
+        n_test = max(1, int(round(test_fraction * n_total)))
+        n_val = max(1, int(round(val_fraction * n_total)))
         n_train = n_total - n_test - n_val
-    if n_train < 1 or n_val < 1 or n_test < 1:
-        raise SystemExit("Unable to allocate train/val/test splits with at least one file each.")
-
-    test_start = n_total - n_test
-    val_start = test_start - n_val
-    train_files = files[:val_start]
-    val_files = files[val_start:test_start]
-    test_files = files[test_start:]
+        test_start = n_total - n_test
+        val_start = test_start - n_val
+        train_files = files[:val_start]
+        val_files = files[val_start:test_start]
+        test_files = files[test_start:]
+    if not train_files or not val_files or not test_files:
+        raise SystemExit("Unable to create non-empty train/val/test source-file splits.")
+    print(
+        f"Source-file splits: train={len(train_files)} val={len(val_files)} test={len(test_files)} "
+        f"official={bool(getattr(ds_cfg, 'use_official_splits', False))}."
+    )
 
     input_n = int(ds_cfg.input_n)
     output_n = int(ds_cfg.output_n)
@@ -465,6 +598,8 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
         node_count=node_count_full,
         hand_groups=hand_groups,
         dataset=ds_cfg.dataset,
+        action_to_id=action_to_id,
+        action_filter=ds_cfg.action_filter,
         time_interp=ds_cfg.time_interp,
         window_norm=window_norm,
         split_hands=split_hands,
@@ -474,6 +609,8 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
         node_count=node_count_full,
         hand_groups=hand_groups,
         dataset=ds_cfg.dataset,
+        action_to_id=action_to_id,
+        action_filter=ds_cfg.action_filter,
         time_interp=ds_cfg.time_interp,
         window_norm=window_norm,
         split_hands=split_hands,
@@ -483,6 +620,8 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
         node_count=node_count_full,
         hand_groups=hand_groups,
         dataset=ds_cfg.dataset,
+        action_to_id=action_to_id,
+        action_filter=ds_cfg.action_filter,
         time_interp=ds_cfg.time_interp,
         window_norm=window_norm,
         split_hands=split_hands,
@@ -492,9 +631,58 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
     if not train_sequences or not test_sequences or not val_sequences:
         raise SystemExit("Not enough sequences to build loaders after split.")
 
-    dset_train = dataset_cls(train_sequences, input_n=input_n, output_n=output_n, stride=ds_cfg.stride)
-    dset_val = dataset_cls(val_sequences, input_n=input_n, output_n=output_n, stride=ds_cfg.stride)
-    dset_test = dataset_cls(test_sequences, input_n=input_n, output_n=output_n, stride=ds_cfg.stride)
+    def _split_sequence_payload(
+        seqs: List[Tuple[Any, ...]],
+    ) -> Tuple[List[Tuple[np.ndarray, float]], List[int]]:
+        payload: List[Tuple[np.ndarray, float]] = []
+        action_ids: List[int] = []
+        for item in seqs:
+            if len(item) == 3:
+                coords, norm_factor, action_id = item
+                payload.append((coords, norm_factor))
+                action_ids.append(int(action_id))
+            elif len(item) == 2:
+                coords, norm_factor = item
+                payload.append((coords, norm_factor))
+            else:
+                raise ValueError(f"Unexpected sequence payload length: {len(item)}")
+        return payload, action_ids
+
+    train_payload, train_action_ids = _split_sequence_payload(train_sequences)
+    val_payload, val_action_ids = _split_sequence_payload(val_sequences)
+    test_payload, test_action_ids = _split_sequence_payload(test_sequences)
+    if not include_action_labels:
+        train_action_ids = []
+        val_action_ids = []
+        test_action_ids = []
+
+    dset_train = dataset_cls(
+        train_payload,
+        input_n=input_n,
+        output_n=output_n,
+        stride=ds_cfg.stride,
+        sequence_action_ids=train_action_ids if include_action_labels else None,
+        action_to_id=action_to_id,
+    )
+    dset_val = dataset_cls(
+        val_payload,
+        input_n=input_n,
+        output_n=output_n,
+        stride=ds_cfg.stride,
+        sequence_action_ids=val_action_ids if include_action_labels else None,
+        action_to_id=action_to_id,
+    )
+    dset_test = dataset_cls(
+        test_payload,
+        input_n=input_n,
+        output_n=output_n,
+        stride=ds_cfg.stride,
+        sequence_action_ids=test_action_ids if include_action_labels else None,
+        action_to_id=action_to_id,
+    )
+    dset_train.source_files = tuple(train_files)
+    dset_val.source_files = tuple(val_files)
+    dset_test.source_files = tuple(test_files)
     if len(dset_train) == 0 or len(dset_test) == 0 or len(dset_val) == 0:
         raise RuntimeError("No valid windows for building DataLoaders (train/val/test).")
     return dset_train, dset_val, dset_test

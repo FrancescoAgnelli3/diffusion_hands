@@ -25,12 +25,14 @@ if str(ROOT) not in sys.path:
 
 from common.evaluation import save_eval_samples_npz
 from common.metrics import humanmac_metrics, splineeqnet_diffusion_batch_eval
+from common.model_profiling import profile_once
 
 @dataclass
 class WindowSample:
     obs: np.ndarray
     fut: np.ndarray
     norm: float
+    sequence_id: int
 
 
 class WindowDataset(Dataset):
@@ -45,7 +47,7 @@ class WindowDataset(Dataset):
         obs = torch.from_numpy(s.obs).float()
         fut = torch.from_numpy(s.fut).float()
         norm = torch.tensor(float(s.norm), dtype=torch.float32)
-        return obs, fut, norm
+        return obs, fut, norm, torch.tensor(s.sequence_id, dtype=torch.long)
 
 
 class BelFusionCVAE(nn.Module):
@@ -127,7 +129,10 @@ def _build_windows_from_sequences(
         for st in range(0, seq.shape[0] - total + 1, stride):
             obs = seq[st : st + input_n]
             fut = seq[st + input_n : st + total]
-            samples.append(WindowSample(obs=obs.astype(np.float32), fut=fut.astype(np.float32), norm=float(norm)))
+            samples.append(WindowSample(
+                obs=obs.astype(np.float32), fut=fut.astype(np.float32),
+                norm=float(norm), sequence_id=int(seq_idx),
+            ))
     return samples
 
 
@@ -241,19 +246,32 @@ def evaluate_model(
     hm_pred_batches: List[torch.Tensor] = []
     hm_gt_batches: List[torch.Tensor] = []
     hm_context_batches: List[torch.Tensor] = []
+    hm_sequence_batches: List[torch.Tensor] = []
     saved_obs: List[torch.Tensor] = []
     saved_tgt: List[torch.Tensor] = []
     saved_pred: List[torch.Tensor] = []
     saved_pred_all: List[torch.Tensor] = []
 
     with torch.no_grad():
-        for obs, fut, norm in test_loader:
+        for obs, fut, norm, sequence_id in test_loader:
             obs = obs.to(device)
             fut = fut.to(device)
             norm = norm.to(device)
             bs = obs.shape[0]
 
             obs_flat = obs.reshape(bs, -1)
+            profile_once(
+                key="belfusion_sampling",
+                model_name="belfusion",
+                modules=[model],
+                sample_fn=lambda: model.sample(
+                    obs_flat[:1], num_samples=num_samples
+                ),
+                sampling_steps=1,
+                batch_size=1,
+                num_candidates=num_samples,
+                notes="Single-pass CVAE sampling",
+            )
             sampled = model.sample(obs_flat, num_samples=num_samples)
             pred = sampled.reshape(num_samples, bs, output_n, n_nodes * 3)
             gt = fut.reshape(bs, output_n, n_nodes * 3)
@@ -265,10 +283,12 @@ def evaluate_model(
                 conditioning_context=conditioning_context,
                 norm_factor=norm,
                 threshold=threshold,
+                sequence_ids=sequence_id,
             )
             hm_pred_batches.append(pred.detach().cpu())
             hm_gt_batches.append(gt.detach().cpu())
             hm_context_batches.append(conditioning_context.detach().cpu())
+            hm_sequence_batches.append(sequence_id.detach().cpu().long().view(-1))
 
             pred_first_all = pred[:, 0].reshape(num_samples, output_n, n_nodes, 3)
             gt_first = gt[0].reshape(output_n, n_nodes, 3)
@@ -287,6 +307,7 @@ def evaluate_model(
         gt_future=torch.cat(hm_gt_batches, dim=0),
         conditioning_context=torch.cat(hm_context_batches, dim=0),
         threshold=threshold,
+        sequence_ids=torch.cat(hm_sequence_batches, dim=0),
     )
 
     out = {}
@@ -355,7 +376,7 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
         model.train()
         train_loss_sum = 0.0
         train_steps = 0
-        for obs, fut, _norm in train_loader:
+        for obs, fut, _norm, _sequence_id in train_loader:
             obs = obs.to(device)
             fut = fut.to(device)
             bs = obs.shape[0]
@@ -381,7 +402,7 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
             val_loss_sum = 0.0
             val_steps = 0
             with torch.no_grad():
-                for obs, fut, _norm in val_loader:
+                for obs, fut, _norm, _sequence_id in val_loader:
                     obs = obs.to(device)
                     fut = fut.to(device)
                     bs = obs.shape[0]

@@ -55,7 +55,7 @@ defaults:
       # Runner-required placeholders for Hydra keys.
       # Shared preprocessing values from experiment.yaml are injected by run_all_models.py.
       num_joints: 22
-      fps: 10
+      fps: 60
       multimodal_threshold: 0.5
       dataset_type: AssemblyDataset
       dataset_name: assembly
@@ -272,7 +272,7 @@ defaults:
       method_name: SkeletonDiffusion
     dataset:
       num_joints: 22
-      fps: 10
+      fps: 60
       dataset_name: assembly
       dtype: float32
       dataset_type: AssemblyDataset

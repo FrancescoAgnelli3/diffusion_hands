@@ -38,10 +38,66 @@ def _normalize_aux_feature(features: AuxFeatureType, expected_len: int) -> AuxFe
     raise TypeError(f"Unsupported aux_features type: {type(features)}")
 
 
+def _normalize_action_metadata(
+    sequence_action_ids: Optional[List[int]],
+    sequence_count: int,
+    action_to_id: Optional[Dict[str, int]],
+) -> Tuple[Optional[List[int]], Dict[str, int], List[str]]:
+    mapping = dict(action_to_id or {})
+    id_to_action = ["unknown" for _ in range(max(mapping.values()) + 1)] if mapping else []
+    for name, idx in mapping.items():
+        if idx < 0:
+            raise ValueError(f"action id must be non-negative, got {idx} for {name!r}")
+        while len(id_to_action) <= idx:
+            id_to_action.append("unknown")
+        id_to_action[idx] = str(name)
+    if sequence_action_ids is None:
+        return None, mapping, id_to_action
+    if len(sequence_action_ids) != sequence_count:
+        raise ValueError(
+            f"sequence_action_ids length mismatch: expected {sequence_count}, got {len(sequence_action_ids)}"
+        )
+    return [int(action_id) for action_id in sequence_action_ids], mapping, id_to_action
+
+
+def _build_window_action_ids(
+    index: List[Tuple[int, int]],
+    sequence_action_ids: Optional[List[int]],
+) -> Optional[torch.Tensor]:
+    if sequence_action_ids is None:
+        return None
+    return torch.tensor([sequence_action_ids[si] for si, _st in index], dtype=torch.long)
+
+
+def _merge_window_aux(
+    aux_features: Optional[AuxFeatureType],
+    action_ids: Optional[torch.Tensor],
+    sequence_ids: torch.Tensor,
+) -> AuxFeatureType:
+    if aux_features is None:
+        merged: Dict[str, torch.Tensor] = {}
+    if torch.is_tensor(aux_features):
+        merged = {"history": aux_features}
+    elif isinstance(aux_features, dict):
+        merged = dict(aux_features)
+    if action_ids is not None:
+        merged["action_id"] = action_ids
+    merged["sequence_id"] = sequence_ids
+    return merged
+
+
 class AssemblyDataset(Dataset):
     """Sliding-window dataset over multiple (T, N, 7) sequences."""
 
-    def __init__(self, sequences: List[Union[np.ndarray, Tuple[np.ndarray, float]]], input_n: int, output_n: int, stride: int = 5):
+    def __init__(
+        self,
+        sequences: List[Union[np.ndarray, Tuple[np.ndarray, float]]],
+        input_n: int,
+        output_n: int,
+        stride: int = 5,
+        sequence_action_ids: Optional[List[int]] = None,
+        action_to_id: Optional[Dict[str, int]] = None,
+    ):
         self.sequences: List[torch.Tensor] = []
         self.norm_factors: List[torch.Tensor] = []
         for item in sequences:
@@ -55,6 +111,12 @@ class AssemblyDataset(Dataset):
         self.output_n = int(output_n)
         self.stride = max(1, int(stride))
         self.aux_features: Optional[AuxFeatureType] = None
+        self.sequence_action_ids, self.action_to_id, self.id_to_action = _normalize_action_metadata(
+            sequence_action_ids,
+            len(self.sequences),
+            action_to_id,
+        )
+        self.num_actions = len(self.id_to_action)
         self.index: List[Tuple[int, int]] = []  # (seq_idx, start_t)
         for si, seq in enumerate(self.sequences):
             T = seq.shape[0]
@@ -63,6 +125,8 @@ class AssemblyDataset(Dataset):
                 continue
             for st in range(0, max_start, self.stride):
                 self.index.append((si, st))
+        self.window_action_ids = _build_window_action_ids(self.index, self.sequence_action_ids)
+        self.window_sequence_ids = torch.tensor([si for si, _st in self.index], dtype=torch.long)
 
         print(
             "AssemblyDataset: "
@@ -80,9 +144,10 @@ class AssemblyDataset(Dataset):
         b = st + self.input_n
         c = b + self.output_n
         norm_factor = self.norm_factors[si].to(dtype=seq.dtype)
-        if self.aux_features is not None:
-            return seq[a:b], seq[b:c], norm_factor, _slice_aux_feature(self.aux_features, i)
-        return seq[a:b], seq[b:c], norm_factor
+        all_aux = _merge_window_aux(
+            self.aux_features, self.window_action_ids, self.window_sequence_ids
+        )
+        return seq[a:b], seq[b:c], norm_factor, _slice_aux_feature(all_aux, i)
 
     def set_aux_features(self, features: Optional[AuxFeatureType]) -> None:
         if features is None:
@@ -93,7 +158,15 @@ class AssemblyDataset(Dataset):
 class h2oDataset(Dataset):
     """Sliding-window dataset over multiple (T, N, 7) sequences."""
 
-    def __init__(self, sequences: List[Union[np.ndarray, Tuple[np.ndarray, float]]], input_n: int, output_n: int, stride: int = 5):
+    def __init__(
+        self,
+        sequences: List[Union[np.ndarray, Tuple[np.ndarray, float]]],
+        input_n: int,
+        output_n: int,
+        stride: int = 5,
+        sequence_action_ids: Optional[List[int]] = None,
+        action_to_id: Optional[Dict[str, int]] = None,
+    ):
         self.sequences: List[torch.Tensor] = []
         self.norm_factors: List[torch.Tensor] = []
         for item in sequences:
@@ -107,6 +180,12 @@ class h2oDataset(Dataset):
         self.output_n = int(output_n)
         self.stride = max(1, int(stride))
         self.aux_features: Optional[AuxFeatureType] = None
+        self.sequence_action_ids, self.action_to_id, self.id_to_action = _normalize_action_metadata(
+            sequence_action_ids,
+            len(self.sequences),
+            action_to_id,
+        )
+        self.num_actions = len(self.id_to_action)
         self.index: List[Tuple[int, int]] = []  # (seq_idx, start_t)
         for si, seq in enumerate(self.sequences):
             T = seq.shape[0]
@@ -115,6 +194,8 @@ class h2oDataset(Dataset):
                 continue
             for st in range(0, max_start, self.stride):
                 self.index.append((si, st))
+        self.window_action_ids = _build_window_action_ids(self.index, self.sequence_action_ids)
+        self.window_sequence_ids = torch.tensor([si for si, _st in self.index], dtype=torch.long)
 
         print(
             "h2oDataset: "
@@ -132,9 +213,10 @@ class h2oDataset(Dataset):
         b = st + self.input_n
         c = b + self.output_n
         norm_factor = self.norm_factors[si].to(dtype=seq.dtype)
-        if self.aux_features is not None:
-            return seq[a:b], seq[b:c], norm_factor, _slice_aux_feature(self.aux_features, i)
-        return seq[a:b], seq[b:c], norm_factor
+        all_aux = _merge_window_aux(
+            self.aux_features, self.window_action_ids, self.window_sequence_ids
+        )
+        return seq[a:b], seq[b:c], norm_factor, _slice_aux_feature(all_aux, i)
 
     def set_aux_features(self, features: Optional[AuxFeatureType]) -> None:
         if features is None:
@@ -145,7 +227,15 @@ class h2oDataset(Dataset):
 class BigHandsDataset(Dataset):
     """Sliding-window dataset over multiple (T, N, 7) sequences."""
 
-    def __init__(self, sequences: List[Union[np.ndarray, Tuple[np.ndarray, float]]], input_n: int, output_n: int, stride: int = 5):
+    def __init__(
+        self,
+        sequences: List[Union[np.ndarray, Tuple[np.ndarray, float]]],
+        input_n: int,
+        output_n: int,
+        stride: int = 5,
+        sequence_action_ids: Optional[List[int]] = None,
+        action_to_id: Optional[Dict[str, int]] = None,
+    ):
         self.sequences: List[torch.Tensor] = []
         self.norm_factors: List[torch.Tensor] = []
         for item in sequences:
@@ -159,6 +249,12 @@ class BigHandsDataset(Dataset):
         self.output_n = int(output_n)
         self.stride = max(1, int(stride))
         self.aux_features: Optional[AuxFeatureType] = None
+        self.sequence_action_ids, self.action_to_id, self.id_to_action = _normalize_action_metadata(
+            sequence_action_ids,
+            len(self.sequences),
+            action_to_id,
+        )
+        self.num_actions = len(self.id_to_action)
         self.index: List[Tuple[int, int]] = []  # (seq_idx, start_t)
         for si, seq in enumerate(self.sequences):
             T = seq.shape[0]
@@ -167,6 +263,8 @@ class BigHandsDataset(Dataset):
                 continue
             for st in range(0, max_start, self.stride):
                 self.index.append((si, st))
+        self.window_action_ids = _build_window_action_ids(self.index, self.sequence_action_ids)
+        self.window_sequence_ids = torch.tensor([si for si, _st in self.index], dtype=torch.long)
 
         print(
             "BigHandsDataset: "
@@ -184,9 +282,10 @@ class BigHandsDataset(Dataset):
         b = st + self.input_n
         c = b + self.output_n
         norm_factor = self.norm_factors[si].to(dtype=seq.dtype)
-        if self.aux_features is not None:
-            return seq[a:b], seq[b:c], norm_factor, _slice_aux_feature(self.aux_features, i)
-        return seq[a:b], seq[b:c], norm_factor
+        all_aux = _merge_window_aux(
+            self.aux_features, self.window_action_ids, self.window_sequence_ids
+        )
+        return seq[a:b], seq[b:c], norm_factor, _slice_aux_feature(all_aux, i)
 
     def set_aux_features(self, features: Optional[AuxFeatureType]) -> None:
         if features is None:
@@ -197,7 +296,15 @@ class BigHandsDataset(Dataset):
 class FPHADataset(Dataset):
     """Sliding-window dataset over multiple (T, N, 7) sequences."""
 
-    def __init__(self, sequences: List[Union[np.ndarray, Tuple[np.ndarray, float]]], input_n: int, output_n: int, stride: int = 5):
+    def __init__(
+        self,
+        sequences: List[Union[np.ndarray, Tuple[np.ndarray, float]]],
+        input_n: int,
+        output_n: int,
+        stride: int = 5,
+        sequence_action_ids: Optional[List[int]] = None,
+        action_to_id: Optional[Dict[str, int]] = None,
+    ):
         self.sequences: List[torch.Tensor] = []
         self.norm_factors: List[torch.Tensor] = []
         for item in sequences:
@@ -211,6 +318,12 @@ class FPHADataset(Dataset):
         self.output_n = int(output_n)
         self.stride = max(1, int(stride))
         self.aux_features: Optional[AuxFeatureType] = None
+        self.sequence_action_ids, self.action_to_id, self.id_to_action = _normalize_action_metadata(
+            sequence_action_ids,
+            len(self.sequences),
+            action_to_id,
+        )
+        self.num_actions = len(self.id_to_action)
         self.index: List[Tuple[int, int]] = []  # (seq_idx, start_t)
         for si, seq in enumerate(self.sequences):
             T = seq.shape[0]
@@ -219,6 +332,8 @@ class FPHADataset(Dataset):
                 continue
             for st in range(0, max_start, self.stride):
                 self.index.append((si, st))
+        self.window_action_ids = _build_window_action_ids(self.index, self.sequence_action_ids)
+        self.window_sequence_ids = torch.tensor([si for si, _st in self.index], dtype=torch.long)
 
         print(
             "FPHADataset: "
@@ -236,9 +351,10 @@ class FPHADataset(Dataset):
         b = st + self.input_n
         c = b + self.output_n
         norm_factor = self.norm_factors[si].to(dtype=seq.dtype)
-        if self.aux_features is not None:
-            return seq[a:b], seq[b:c], norm_factor, _slice_aux_feature(self.aux_features, i)
-        return seq[a:b], seq[b:c], norm_factor
+        all_aux = _merge_window_aux(
+            self.aux_features, self.window_action_ids, self.window_sequence_ids
+        )
+        return seq[a:b], seq[b:c], norm_factor, _slice_aux_feature(all_aux, i)
 
     def set_aux_features(self, features: Optional[AuxFeatureType]) -> None:
         if features is None:

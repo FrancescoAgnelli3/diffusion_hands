@@ -1,6 +1,6 @@
 import argparse
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 
@@ -99,6 +99,23 @@ MODEL_DEFAULT_CONFIGS: Dict[str, Dict[str, object]] = {
         "card_mamp_motion_aware_tau": 0.80,
         "card_mpjpe_weight": 0.0,
         "card_coarse_target_lowpass_only": False,
+        "card_use_latent_variability": False,
+        "card_latent_dim": 8,
+        "card_beta_kl": 1e-3,
+        "card_kl_anneal_steps": 0,
+        "card_latent_encoder_hidden_dim": 256,
+        "card_latent_conditioning_mode": "add",
+        "card_num_actions": 1,
+        "card_latent_baseline_pretrain_epochs": 0,
+        "card_latent_warmup_epochs": 0,
+        "card_latent_joint_lr_scale": 0.1,
+        "card_explainable_latent_decomposition": False,
+        "card_latent_action_dim": 4,
+        "card_latent_style_dim": 4,
+        "card_latent_residual_dim": 4,
+        "card_beta_action": 0.1,
+        "card_beta_adversarial": 0.1,
+        "card_grl_anneal_steps": 10000,
         "epochs": 50,
         "early_stopping_enabled": True,
         "early_stopping_patience": 20,
@@ -121,17 +138,26 @@ class DatasetCfg:
     batch_size: int = 128
     eval_batch_mult: int = 1
     seed: int = 0
+    data_seed: Optional[int] = None  # Split/subsampling seed; None preserves legacy behavior.
     wrist_indices: Tuple[int, ...] = ()
     dataset: str = "assembly"
     node_count: int = 21
     edge_index: Tuple[Tuple[int, int], ...] = tuple()
     adjacency: Tuple[Tuple[int, ...], ...] = tuple()
     subset_files: Optional[Tuple[str, ...]] = None
+    include_action_labels: bool = False
+    max_source_files: int = 0
+    balanced_action_sampling: bool = False
+    use_official_splits: bool = False
 
 
 @dataclass
 class TrainCfg:
     model: str = "card"
+    card_variant: str = "card"
+    proposal_options: Dict[str, object] = field(default_factory=dict)
+    use_lr_scheduler: bool = True
+    protocol_audit_path: str = ""
     epochs: int = 10
     lr: float = 1e-3
     hidden_size: int = 128
@@ -140,7 +166,14 @@ class TrainCfg:
     bone_loss_weight: float = 0.0
     velocity_loss_weight: float = 0.0
     save_eval_examples: bool = False
+    eval_examples_path: str = ""
+    eval_examples_dir: str = ""
     save_coarse_model: bool = False
+    per_action_metrics_path: str = ""
+    explainability_output_dir: str = ""
+    card_explainability_enabled: bool = False
+    card_explainability_steps: int = 25
+    result_model_name: str = ""
     use_space: bool = True
     early_stopping_enabled: bool = False
     early_stopping_patience: int = 20
@@ -207,6 +240,23 @@ class TrainCfg:
     card_mamp_motion_aware_tau: Optional[float] = None
     card_mpjpe_weight: Optional[float] = None
     card_coarse_target_lowpass_only: Optional[bool] = None
+    card_use_latent_variability: Optional[bool] = None
+    card_latent_dim: Optional[int] = None
+    card_beta_kl: Optional[float] = None
+    card_kl_anneal_steps: Optional[int] = None
+    card_latent_encoder_hidden_dim: Optional[int] = None
+    card_latent_conditioning_mode: Optional[str] = None
+    card_num_actions: Optional[int] = None
+    card_latent_baseline_pretrain_epochs: Optional[int] = None
+    card_latent_warmup_epochs: Optional[int] = None
+    card_latent_joint_lr_scale: Optional[float] = None
+    card_explainable_latent_decomposition: Optional[bool] = None
+    card_latent_action_dim: Optional[int] = None
+    card_latent_style_dim: Optional[int] = None
+    card_latent_residual_dim: Optional[int] = None
+    card_beta_action: Optional[float] = None
+    card_beta_adversarial: Optional[float] = None
+    card_grl_anneal_steps: Optional[int] = None
     card_graph_laplacian_tau: Optional[float] = None
     card_covariance_jitter: Optional[float] = None
 

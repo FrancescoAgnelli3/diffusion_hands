@@ -1,0 +1,30 @@
+seed: 0
+gpu_index: 1
+num_candidates: 10
+humanmac_multimodal_threshold: 7.0
+save_model: true
+
+preprocessing:
+  input_n: 50
+  output_n: 50
+  stride: 5
+  time_interp: null
+  window_norm: null
+  eval_batch_mult: 1
+
+data_roots:
+  assembly: /mnt/pve/Turing-Storage2/AssemblyHands/assembly101-download-scripts/data_our/
+
+datasets: [assembly]
+action_filter: [pick_up_screwd]
+
+runtime:
+  output_root: ./results
+  aggregate_csv: ./results/star_hand_fihard_metrics.csv
+  per_action_csv: ./results/star_hand_fihard_by_action.csv
+
+models:
+  star_hand:
+    enabled: true
+  fihard:
+    enabled: true

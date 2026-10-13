@@ -8,9 +8,11 @@ import math
 import pickle
 import sys
 import importlib
+from dataclasses import fields
+from itertools import combinations
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, Iterator, List, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -29,6 +31,10 @@ if str(REPO_ROOT) not in sys.path:
 
 METRICS = ("APD", "ADE", "FDE", "MMADE", "MMFDE", "CMD", "FID")
 BAYESIAN_METRICS = tuple(metric for metric in METRICS if metric != "APD")
+CARD_VARIANTS = ("card", "star_hand", "fihard")
+REFERENCE_MODEL = "comusion"
+ALL_MODELS = (*CARD_VARIANTS, REFERENCE_MODEL)
+PAIRWISE_COMPARISONS = tuple(combinations(ALL_MODELS, 2))
 
 
 @contextlib.contextmanager
@@ -116,7 +122,10 @@ def load_yaml(path: Path) -> dict:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate paired test-set metrics and Bayesian signed-rank plots for two checkpoints."
+        description=(
+            "Generate paired test-set metrics and Bayesian signed-rank reports for "
+            "CARD, STAR-Hand, and FiHard against CoMusion."
+        )
     )
     parser.add_argument(
         "--card-checkpoint",
@@ -130,6 +139,18 @@ def parse_args() -> argparse.Namespace:
             / "checkpoints"
             / "final.pt"
         ),
+    )
+    parser.add_argument(
+        "--star-hand-checkpoint",
+        type=Path,
+        default=None,
+        help="STAR-Hand final checkpoint. Required unless complete cached metrics already exist.",
+    )
+    parser.add_argument(
+        "--fihard-checkpoint",
+        type=Path,
+        default=None,
+        help="FiHard final checkpoint. Required unless complete cached metrics already exist.",
     )
     parser.add_argument(
         "--comusion-checkpoint",
@@ -146,6 +167,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset", default="assembly")
     parser.add_argument("--action-filter", default="pick_up_screwd")
+    parser.add_argument(
+        "--experiment-config",
+        type=Path,
+        default=REPO_ROOT / "configs" / "experiment.yaml",
+        help="Experiment YAML supplying preprocessing, data roots, seed, and evaluation defaults.",
+    )
     parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--num-candidates", type=int, default=None)
     parser.add_argument("--humanmac-threshold", type=float, default=None)
@@ -159,13 +186,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=REPO_ROOT / "out" / "bayesian_signed_rank" / "assembly_pick_up_screwd_card_vs_comusion",
+        default=(
+            REPO_ROOT
+            / "out"
+            / "bayesian_signed_rank"
+            / "assembly_pick_up_screwd_card_variants_vs_comusion"
+        ),
     )
     return parser.parse_args()
 
 
 def resolve_runtime_config(args: argparse.Namespace) -> dict:
-    experiment_cfg = load_yaml(REPO_ROOT / "configs" / "experiment.yaml")
+    experiment_cfg = load_yaml(args.experiment_config)
     preprocessing = dict(experiment_cfg.get("preprocessing", {}))
     data_roots = {
         "assembly": "/mnt/pve/Turing-Storage2/AssemblyHands/assembly101-download-scripts/data_our/",
@@ -194,13 +226,24 @@ def resolve_runtime_config(args: argparse.Namespace) -> dict:
     }
 
 
-def compute_multimodal_groups(context_flat: torch.Tensor, threshold: float) -> List[torch.Tensor]:
+def compute_multimodal_groups(
+    context_flat: torch.Tensor,
+    threshold: float,
+    sequence_ids: Optional[torch.Tensor] = None,
+) -> List[torch.Tensor]:
     if context_flat.ndim > 2:
         context_flat = context_flat.reshape(context_flat.shape[0], -1)
     pairwise = torch.cdist(context_flat.cpu(), context_flat.cpu())
+    eligible = pairwise < float(threshold)
+    eligible.fill_diagonal_(False)
+    if sequence_ids is not None:
+        sequence_ids = torch.as_tensor(sequence_ids).reshape(-1).cpu()
+        if sequence_ids.numel() != pairwise.shape[0]:
+            raise ValueError("sequence_ids must contain one id per evaluated sample")
+        eligible &= sequence_ids[:, None] != sequence_ids[None, :]
     groups: List[torch.Tensor] = []
     for sample_idx in range(pairwise.shape[0]):
-        groups.append(torch.nonzero(pairwise[sample_idx] < float(threshold), as_tuple=False).reshape(-1))
+        groups.append(torch.nonzero(eligible[sample_idx], as_tuple=False).reshape(-1))
     return groups
 
 
@@ -209,10 +252,13 @@ def compute_per_sample_metric_table(
     gt_future: torch.Tensor,
     context_flat: torch.Tensor,
     threshold: float,
+    sequence_ids: Optional[torch.Tensor] = None,
 ) -> pd.DataFrame:
     from common.metrics import compute_all_metrics_single, distributional_motion_metrics
 
-    groups = compute_multimodal_groups(context_flat=context_flat, threshold=threshold)
+    groups = compute_multimodal_groups(
+        context_flat=context_flat, threshold=threshold, sequence_ids=sequence_ids
+    )
     rows: List[Dict[str, float]] = []
     gt_flat = gt_future.reshape(gt_future.shape[0], gt_future.shape[1], -1).cpu()
     pred_flat = pred_candidates.reshape(pred_candidates.shape[0], pred_candidates.shape[1], pred_candidates.shape[2], -1).cpu()
@@ -244,18 +290,19 @@ def save_prediction_cache(
     pred_candidates: torch.Tensor,
     gt_future: torch.Tensor,
     context: torch.Tensor,
+    sequence_ids: Optional[torch.Tensor] = None,
     metadata: Dict[str, object],
 ) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
+    payload = {
             "pred_candidates": pred_candidates.cpu(),
             "gt_future": gt_future.cpu(),
             "context": context.cpu(),
             "metadata": dict(metadata),
-        },
-        cache_path,
-    )
+        }
+    if sequence_ids is not None:
+        payload["sequence_ids"] = torch.as_tensor(sequence_ids).cpu().long()
+    torch.save(payload, cache_path)
 
 
 def load_prediction_cache(cache_path: Path) -> Dict[str, torch.Tensor]:
@@ -334,7 +381,8 @@ def build_card_test_loader(dataset: str, action_filter: str, runtime_cfg: dict):
         return ds_cfg, metadata, test_loader
 
 
-def evaluate_card(
+def evaluate_card_variant(
+    model_name: str,
     checkpoint_path: Path,
     dataset: str,
     action_filter: str,
@@ -343,8 +391,11 @@ def evaluate_card(
     cache_path: Path,
     force_recompute: bool,
 ) -> Tuple[pd.DataFrame, Dict[str, torch.Tensor]]:
+    model_name = str(model_name).strip().lower()
+    if model_name not in CARD_VARIANTS:
+        raise ValueError(f"Unknown CARD variant {model_name!r}; expected one of {CARD_VARIANTS}")
     expected_meta = prediction_cache_metadata(
-        model_name="card",
+        model_name=model_name,
         checkpoint_path=checkpoint_path,
         dataset=dataset,
         action_filter=action_filter,
@@ -353,7 +404,7 @@ def evaluate_card(
     if cache_path.exists() and not force_recompute:
         payload = load_prediction_cache(cache_path)
         if cache_matches(payload, expected_meta):
-            log(f"Loading cached card predictions from {cache_path}")
+            log(f"Loading cached {model_name} predictions from {cache_path}")
             pred_candidates = payload["pred_candidates"]
             gt_future = payload["gt_future"]
             context = payload["context"]
@@ -362,28 +413,39 @@ def evaluate_card(
                 gt_future=gt_future,
                 context_flat=context.reshape(context.shape[0], context.shape[1], -1),
                 threshold=float(runtime_cfg["humanmac_threshold"]),
+                sequence_ids=payload.get("sequence_ids"),
             )
-            log(f"Twostage metrics loaded from cached predictions for {len(table)} samples")
-            return table, {"pred_candidates": pred_candidates, "gt_future": gt_future, "context": context}
-        log("Twostage cache metadata mismatch, recomputing predictions")
+            log(f"{model_name} metrics loaded from cached predictions for {len(table)} samples")
+            return table, {"pred_candidates": pred_candidates, "gt_future": gt_future,
+                           "context": context, "sequence_ids": payload.get("sequence_ids")}
+        log(f"{model_name} cache metadata mismatch, recomputing predictions")
 
     log(
-        "Preparing card evaluation "
+        f"Preparing {model_name} evaluation "
         f"(dataset={dataset}, action_filter={action_filter}, checkpoint={checkpoint_path})"
     )
     ds_cfg, _metadata, test_loader = build_card_test_loader(dataset, action_filter, runtime_cfg)
     log(
-        "Twostage test loader ready "
+        f"{model_name} test loader ready "
         f"(samples={len(test_loader.dataset)}, batches={len(test_loader)}, num_candidates={runtime_cfg['num_candidates']})"
     )
 
     purge_vendor_modules("config", "data", "datasets", "models", "runner", "train_utils")
     with prepend_sys_path(VENDOR_SPLINE):
-        from models.card import CardConfig, CardForecaster
         from data import resolve_card_hand_graph_metadata
 
-        model_cfg = load_yaml(REPO_ROOT / "configs" / "models" / "card.yaml")["defaults"]
-        tw_cfg = CardConfig(
+        module_name = {
+            "card": "models.card",
+            "star_hand": "models.star_hand",
+            "fihard": "models.fihard",
+        }[model_name]
+        model_module = importlib.import_module(module_name)
+        config_type = model_module.CardConfig
+        forecaster_type = model_module.CardForecaster
+        model_cfg = load_yaml(
+            REPO_ROOT / "configs" / "models" / f"{model_name}.yaml"
+        )["defaults"]
+        config_kwargs = dict(
             input_length=int(ds_cfg.input_n),
             pred_length=int(ds_cfg.output_n),
             num_nodes=int(ds_cfg.node_count),
@@ -393,9 +455,28 @@ def evaluate_card(
             diffusion_steps=int(model_cfg["card_diffusion_steps"]),
             ddim_steps=int(model_cfg["card_ddim_steps"]),
             isotropic_noise=bool(model_cfg["card_isotropic_noise"]),
+            spatial_anisotropy=bool(model_cfg["card_spatial_anisotropy"]),
             beta_matrix_power=float(model_cfg["card_beta_matrix_power"]),
             beta_matrix_min_rate=float(model_cfg["card_beta_matrix_min_rate"]),
             beta_matrix_max_rate=float(model_cfg["card_beta_matrix_max_rate"]),
+            temporal_anisotropy=bool(model_cfg["card_temporal_anisotropy"]),
+            temporal_anisotropy_q=float(model_cfg["card_temporal_anisotropy_q"]),
+            temporal_operator_type=str(model_cfg["card_temporal_operator_type"]),
+            temporal_operator_spectral_transform=str(
+                model_cfg["card_temporal_operator_spectral_transform"]
+            ),
+            temporal_velocity_weight=float(model_cfg["card_temporal_velocity_weight"]),
+            temporal_acceleration_weight=float(model_cfg["card_temporal_acceleration_weight"]),
+            temporal_jerk_weight=float(model_cfg["card_temporal_jerk_weight"]),
+            temporal_anisotropy_learned_from_history=bool(
+                model_cfg["card_temporal_anisotropy_learned_from_history"]
+            ),
+            temporal_anisotropy_history_dim=int(
+                model_cfg["card_temporal_anisotropy_history_dim"]
+            ),
+            temporal_anisotropy_delta_max_abs=float(
+                model_cfg["card_temporal_anisotropy_delta_max_abs"]
+            ),
             node_covariance_type=str(model_cfg["card_node_covariance_type"]),
             mobility_palm_var=float(model_cfg["card_mobility_palm_var"]),
             mobility_depth1_var=float(model_cfg["card_mobility_depth1_var"]),
@@ -422,11 +503,15 @@ def evaluate_card(
             simlpe_norm_axis=str(model_cfg["simlpe_norm_axis"]),
             simlpe_add_last_offset=bool(model_cfg["simlpe_add_last_offset"]),
         )
+        supported_fields = {field.name for field in fields(config_type)}
+        tw_cfg = config_type(
+            **{key: value for key, value in config_kwargs.items() if key in supported_fields}
+        )
         graph_meta = resolve_card_hand_graph_metadata(
             ds_cfg.dataset,
             tuple(int(idx) for idx in ds_cfg.wrist_indices),
         )
-        model = CardForecaster(
+        model = forecaster_type(
             tw_cfg,
             metadata={
                 "wrist_index": int(graph_meta["wrist_index"]),
@@ -441,24 +526,29 @@ def evaluate_card(
         missing, unexpected = model.load_state_dict(state, strict=False)
         if missing or unexpected:
             print(
-                f"[card] load_state_dict missing={len(missing)} unexpected={len(unexpected)}"
+                f"[{model_name}] load_state_dict missing={len(missing)} "
+                f"unexpected={len(unexpected)}"
             )
         model.eval()
-        log(f"Loaded card checkpoint on device={device}")
+        log(f"Loaded {model_name} checkpoint on device={device}")
 
         contexts: List[torch.Tensor] = []
         futures: List[torch.Tensor] = []
         candidates: List[torch.Tensor] = []
+        sequence_ids: List[torch.Tensor] = []
         num_candidates = int(runtime_cfg["num_candidates"])
         for batch_idx, batch in enumerate(
             tqdm(
                 test_loader,
-                desc="card test",
+                desc=f"{model_name} test",
                 unit="batch",
                 leave=True,
             )
         ):
             inp, out = batch[:2]
+            if (len(batch) > 3 and isinstance(batch[3], dict)
+                    and torch.is_tensor(batch[3].get("sequence_id"))):
+                sequence_ids.append(batch[3]["sequence_id"].detach().cpu().long().view(-1))
             inp = inp.to(device).float()
             out = out.to(device).float()
             in_3d = inp[:, :, :, 4:]
@@ -480,29 +570,33 @@ def evaluate_card(
             futures.append(tgt_3d.detach().cpu())
             if batch_idx == 0:
                 log(
-                    "Twostage first batch shapes "
+                    f"{model_name} first batch shapes "
                     f"(context={tuple(in_3d.shape)}, target={tuple(tgt_3d.shape)}, candidates={tuple(candidates[-1].shape)})"
                 )
 
     pred_candidates = torch.cat(candidates, dim=0)
     gt_future = torch.cat(futures, dim=0)
     context = torch.cat(contexts, dim=0)
+    all_sequence_ids = torch.cat(sequence_ids, dim=0) if sequence_ids else None
     table = compute_per_sample_metric_table(
         pred_candidates=pred_candidates,
         gt_future=gt_future,
         context_flat=context.reshape(context.shape[0], context.shape[1], -1),
         threshold=float(runtime_cfg["humanmac_threshold"]),
+        sequence_ids=all_sequence_ids,
     )
     save_prediction_cache(
         cache_path,
         pred_candidates=pred_candidates,
         gt_future=gt_future,
         context=context,
+        sequence_ids=all_sequence_ids,
         metadata=expected_meta,
     )
-    log(f"Saved card prediction cache to {cache_path}")
-    log(f"Twostage metrics computed for {len(table)} samples")
-    return table, {"pred_candidates": pred_candidates, "gt_future": gt_future, "context": context}
+    log(f"Saved {model_name} prediction cache to {cache_path}")
+    log(f"{model_name} metrics computed for {len(table)} samples")
+    return table, {"pred_candidates": pred_candidates, "gt_future": gt_future,
+                   "context": context, "sequence_ids": all_sequence_ids}
 
 
 def build_comusion_cfg(dataset: str, action_filter: str, runtime_cfg: dict) -> SimpleNamespace:
@@ -597,9 +691,11 @@ def evaluate_comusion(
                 gt_future=gt_future,
                 context_flat=context.reshape(context.shape[0], context.shape[1], -1),
                 threshold=float(runtime_cfg["humanmac_threshold"]),
+                sequence_ids=payload.get("sequence_ids"),
             )
             log(f"CoMusion metrics loaded from cached predictions for {len(table)} samples")
-            return table, {"pred_candidates": pred_candidates, "gt_future": gt_future, "context": context}
+            return table, {"pred_candidates": pred_candidates, "gt_future": gt_future,
+                           "context": context, "sequence_ids": payload.get("sequence_ids")}
         log("CoMusion cache metadata mismatch, recomputing predictions")
 
     log(
@@ -653,6 +749,7 @@ def evaluate_comusion(
         contexts: List[torch.Tensor] = []
         futures: List[torch.Tensor] = []
         candidates: List[torch.Tensor] = []
+        sequence_ids: List[torch.Tensor] = []
         num_candidates = int(runtime_cfg["num_candidates"])
         for batch_idx, batch in enumerate(
             tqdm(
@@ -663,6 +760,8 @@ def evaluate_comusion(
             )
         ):
             data, extra = trainer._batch_to_traj_and_extra(batch)
+            if torch.is_tensor(extra.get("sequence_id")):
+                sequence_ids.append(extra["sequence_id"].detach().cpu().long().view(-1))
             data_flat = trainer._flatten_motion(data)
             gt = data_flat[:, trainer.input_n :, :].to(device).to(torch.float32)
             batch_candidates: List[torch.Tensor] = []
@@ -689,27 +788,31 @@ def evaluate_comusion(
     pred_candidates = torch.cat(candidates, dim=0)
     gt_future = torch.cat(futures, dim=0)
     context = torch.cat(contexts, dim=0)
+    all_sequence_ids = torch.cat(sequence_ids, dim=0) if sequence_ids else None
     table = compute_per_sample_metric_table(
         pred_candidates=pred_candidates,
         gt_future=gt_future,
         context_flat=context.reshape(context.shape[0], context.shape[1], -1),
         threshold=float(runtime_cfg["humanmac_threshold"]),
+        sequence_ids=all_sequence_ids,
     )
     save_prediction_cache(
         cache_path,
         pred_candidates=pred_candidates,
         gt_future=gt_future,
         context=context,
+        sequence_ids=all_sequence_ids,
         metadata=expected_meta,
     )
     log(f"Saved comusion prediction cache to {cache_path}")
     log(f"CoMusion metrics computed for {len(table)} samples")
-    return table, {"pred_candidates": pred_candidates, "gt_future": gt_future, "context": context}
+    return table, {"pred_candidates": pred_candidates, "gt_future": gt_future,
+                   "context": context, "sequence_ids": all_sequence_ids}
 
 
 def save_metric_artifacts(
     output_dir: Path,
-    card_table: pd.DataFrame,
+    variant_tables: Dict[str, pd.DataFrame],
     comusion_table: pd.DataFrame,
     alpha: float,
     rope: float,
@@ -726,31 +829,64 @@ def save_metric_artifacts(
         paired_dir.mkdir(parents=True, exist_ok=True)
         reports_dir.mkdir(parents=True, exist_ok=True)
 
-        combined = card_table[["sample_idx"]].copy()
+        first_variant = CARD_VARIANTS[0]
+        combined = variant_tables[first_variant][["sample_idx"]].copy()
+        all_tables = {**variant_tables, REFERENCE_MODEL: comusion_table}
+        expected_sample_ids = combined["sample_idx"].to_numpy()
+        for model_name, table in all_tables.items():
+            if len(table) != len(combined):
+                raise RuntimeError(
+                    f"Sample count mismatch: {model_name}={len(table)} vs "
+                    f"{first_variant}={len(combined)}"
+                )
+            if not np.array_equal(table["sample_idx"].to_numpy(), expected_sample_ids):
+                raise RuntimeError(
+                    f"Paired sample indices differ for {model_name} and {first_variant}"
+                )
         for metric in METRICS:
-            combined[f"card__{metric}"] = card_table[metric]
-            combined[f"comusion__{metric}"] = comusion_table[metric]
+            for model_name, table in all_tables.items():
+                combined[f"{model_name}__{metric}"] = table[metric]
         combined.to_csv(output_dir / "all_sample_metrics.csv", index=False)
 
-        for metric in METRICS:
-            log(f"Running Bayesian signed-rank test for {metric}")
-            paired = pd.DataFrame(
-                {
-                    "sample_idx": card_table["sample_idx"].to_numpy(),
-                    "card": card_table[metric].to_numpy(),
-                    "comusion": comusion_table[metric].to_numpy(),
-                }
-            ).dropna().reset_index(drop=True)
-            if len(paired) < 2:
-                raise RuntimeError(f"Not enough valid paired samples for metric {metric}: {len(paired)}")
-            paired.to_csv(paired_dir / f"{metric.lower()}_paired.csv", index=False)
+        for left_model, right_model in PAIRWISE_COMPARISONS:
+            pair_dir = paired_dir / f"{left_model}_vs_{right_model}"
+            pair_dir.mkdir(parents=True, exist_ok=True)
+            for metric in METRICS:
+                paired = pd.DataFrame(
+                    {
+                        "sample_idx": all_tables[left_model]["sample_idx"].to_numpy(),
+                        left_model: all_tables[left_model][metric].to_numpy(),
+                        right_model: all_tables[right_model][metric].to_numpy(),
+                    }
+                ).dropna().reset_index(drop=True)
+                if len(paired) < 2:
+                    raise RuntimeError(
+                        f"Not enough valid paired samples for {left_model} vs "
+                        f"{right_model}, metric {metric}: {len(paired)}"
+                    )
+                paired.to_csv(pair_dir / f"{metric.lower()}_paired.csv", index=False)
 
         log("Skipping Bayesian signed-rank test for APD")
-        for metric in tqdm(BAYESIAN_METRICS, desc="bayesian metrics", unit="metric", leave=True):
-            log(f"Running Bayesian signed-rank test for {metric}")
-            paired = pd.read_csv(paired_dir / f"{metric.lower()}_paired.csv")
+        summary_rows: List[Dict[str, object]] = []
+        jobs = [
+            (left_model, right_model, metric)
+            for left_model, right_model in PAIRWISE_COMPARISONS
+            for metric in BAYESIAN_METRICS
+        ]
+        for left_model, right_model, metric in tqdm(
+            jobs, desc="bayesian comparisons", unit="comparison", leave=True
+        ):
+            log(
+                f"Running Bayesian signed-rank test: "
+                f"{left_model} vs {right_model}, {metric}"
+            )
+            paired = pd.read_csv(
+                paired_dir
+                / f"{left_model}_vs_{right_model}"
+                / f"{metric.lower()}_paired.csv"
+            )
             result = autorank(
-                paired[["card", "comusion"]],
+                paired[[left_model, right_model]],
                 alpha=alpha,
                 verbose=False,
                 order="ascending",
@@ -760,38 +896,73 @@ def save_metric_artifacts(
                 nsamples=nsamples,
                 random_state=42,
             )
+            # autorank stores P(left > right), P(ROPE), P(right > left).
+            # Every tested metric here is minimized, so the probability that
+            # the left/model is better is P(right > left).
+            p_left_worse, p_equal, p_right_worse = extract_pairwise_posterior_triplet(
+                result, left_model, right_model
+            )
+            summary_rows.append(
+                {
+                    "left_model": left_model,
+                    "right_model": right_model,
+                    "metric": metric,
+                    "n_pairs": len(paired),
+                    "p_left_better": p_right_worse,
+                    "p_rope": p_equal,
+                    "p_right_better": p_left_worse,
+                    "alpha": float(alpha),
+                    "rope": float(rope),
+                    "rope_mode": str(rope_mode),
+                    "nsamples": int(nsamples),
+                }
+            )
 
             report_buffer = io.StringIO()
             with contextlib.redirect_stdout(report_buffer):
                 create_report(result)
-            with open(reports_dir / f"{metric.lower()}_report.txt", "w", encoding="utf-8") as handle:
+            report_path = (
+                reports_dir
+                / f"{left_model}_vs_{right_model}__{metric.lower()}_report.txt"
+            )
+            with open(report_path, "w", encoding="utf-8") as handle:
                 handle.write(report_buffer.getvalue())
-            log(f"Saved artifacts for {metric}")
+            log(f"Saved {report_path.name}")
+
+        pd.DataFrame(summary_rows).to_csv(
+            output_dir / "bayesian_pairwise_summary.csv", index=False
+        )
 
 
 def metrics_csv_path(output_dir: Path) -> Path:
     return output_dir / "all_sample_metrics.csv"
 
 
-def load_metrics_tables_from_csv(output_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_metrics_tables_from_csv(
+    output_dir: Path,
+) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
     csv_path = metrics_csv_path(output_dir)
     if not csv_path.exists():
         raise FileNotFoundError(f"Metrics CSV not found: {csv_path}")
     combined = pd.read_csv(csv_path)
     required_columns = ["sample_idx"]
-    for metric in METRICS:
-        required_columns.append(f"card__{metric}")
-        required_columns.append(f"comusion__{metric}")
+    for model_name in (*CARD_VARIANTS, REFERENCE_MODEL):
+        for metric in METRICS:
+            required_columns.append(f"{model_name}__{metric}")
     missing = [col for col in required_columns if col not in combined.columns]
     if missing:
         raise RuntimeError(f"Metrics CSV is missing required columns: {missing}")
 
-    card_table = pd.DataFrame({"sample_idx": combined["sample_idx"]})
+    variant_tables: Dict[str, pd.DataFrame] = {}
+    for model_name in CARD_VARIANTS:
+        table = pd.DataFrame({"sample_idx": combined["sample_idx"]})
+        for metric in METRICS:
+            table[metric] = combined[f"{model_name}__{metric}"]
+        variant_tables[model_name] = table
     comusion_table = pd.DataFrame({"sample_idx": combined["sample_idx"]})
     for metric in METRICS:
-        card_table[metric] = combined[f"card__{metric}"]
         comusion_table[metric] = combined[f"comusion__{metric}"]
-    return card_table, comusion_table
+    return variant_tables, comusion_table
 
 
 def main() -> None:
@@ -813,17 +984,46 @@ def main() -> None:
     metrics_path = metrics_csv_path(args.output_dir)
     if metrics_path.exists() and not args.force_recompute:
         log(f"Loading existing per-sample metrics from {metrics_path}")
-        card_table, comusion_table = load_metrics_tables_from_csv(args.output_dir)
+        variant_tables, comusion_table = load_metrics_tables_from_csv(args.output_dir)
     else:
-        card_table, _card_payload = evaluate_card(
-            checkpoint_path=args.card_checkpoint,
-            dataset=args.dataset,
-            action_filter=args.action_filter,
-            runtime_cfg=runtime_cfg,
-            device=device,
-            cache_path=cache_dir / "card_predictions.pt",
-            force_recompute=bool(args.force_recompute),
-        )
+        checkpoint_by_model = {
+            "card": args.card_checkpoint,
+            "star_hand": args.star_hand_checkpoint,
+            "fihard": args.fihard_checkpoint,
+        }
+        missing_checkpoints = [
+            model_name
+            for model_name, checkpoint_path in checkpoint_by_model.items()
+            if checkpoint_path is None
+        ]
+        if missing_checkpoints:
+            flags = {
+                "star_hand": "--star-hand-checkpoint",
+                "fihard": "--fihard-checkpoint",
+            }
+            required_flags = ", ".join(
+                flags.get(model_name, "--card-checkpoint")
+                for model_name in missing_checkpoints
+            )
+            raise ValueError(
+                "Missing CARD-variant checkpoints required to compute paired metrics: "
+                f"{missing_checkpoints}. Provide {required_flags}, or reuse an output "
+                "directory containing a complete all_sample_metrics.csv."
+            )
+        variant_tables = {}
+        for model_name in CARD_VARIANTS:
+            checkpoint_path = checkpoint_by_model[model_name]
+            assert checkpoint_path is not None
+            variant_tables[model_name], _payload = evaluate_card_variant(
+                model_name=model_name,
+                checkpoint_path=checkpoint_path,
+                dataset=args.dataset,
+                action_filter=args.action_filter,
+                runtime_cfg=runtime_cfg,
+                device=device,
+                cache_path=cache_dir / f"{model_name}_predictions.pt",
+                force_recompute=bool(args.force_recompute),
+            )
         comusion_table, _comusion_payload = evaluate_comusion(
             checkpoint_path=args.comusion_checkpoint,
             dataset=args.dataset,
@@ -834,14 +1034,16 @@ def main() -> None:
             force_recompute=bool(args.force_recompute),
         )
 
-    if len(card_table) != len(comusion_table):
-        raise RuntimeError(
-            f"Sample count mismatch: card={len(card_table)} vs comusion={len(comusion_table)}"
-        )
+    for model_name, table in variant_tables.items():
+        if len(table) != len(comusion_table):
+            raise RuntimeError(
+                f"Sample count mismatch: {model_name}={len(table)} vs "
+                f"comusion={len(comusion_table)}"
+            )
 
     save_metric_artifacts(
         output_dir=args.output_dir,
-        card_table=card_table,
+        variant_tables=variant_tables,
         comusion_table=comusion_table,
         alpha=float(args.alpha),
         rope=float(args.rope),

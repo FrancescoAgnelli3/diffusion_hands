@@ -30,6 +30,9 @@ defaults:
     augmentation: 0
     data_aug: false
     rota_prob: 0
+    max_source_files: 0
+    balanced_action_sampling: false
+    use_official_splits: false
     multimodal_threshold: 0.5
     humanmac_multimodal_threshold: 0.5
   diff_specs:

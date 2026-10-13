@@ -134,3 +134,17 @@ class DatasetAssembly(Dataset):
                 norm_factor = self.norm_factors.get(seq_name, 1.0)
                 for start in range(0, max_start + 1, self.stride):
                     yield seq[None, start : start + self.t_total], float(norm_factor)
+
+    def iter_generator_with_scale_and_sequence_id(self):
+        for data_s in self.data.values():
+            for sequence_id, (seq_name, seq) in enumerate(data_s.items()):
+                max_start = seq.shape[0] - self.t_total
+                if max_start < 0:
+                    continue
+                norm_factor = self.norm_factors.get(seq_name, 1.0)
+                for start in range(0, max_start + 1, self.stride):
+                    yield (
+                        seq[None, start : start + self.t_total],
+                        float(norm_factor),
+                        int(sequence_id),
+                    )

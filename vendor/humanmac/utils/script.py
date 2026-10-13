@@ -106,11 +106,18 @@ def get_multimodal_gt_full(logger, dataset_multi_test, args, cfg):
     """
     logger.info('preparing full evaluation dataset...')
     data_group = []
+    sequence_ids = []
     num_samples = 0
-    data_gen_multi_test = dataset_multi_test.iter_generator(step=cfg.t_his)
-    for data, _ in data_gen_multi_test:
+    has_sequence_ids = hasattr(dataset_multi_test, 'iter_generator_with_sequence_id')
+    data_gen_multi_test = (
+        dataset_multi_test.iter_generator_with_sequence_id(step=cfg.t_his)
+        if has_sequence_ids else dataset_multi_test.iter_generator(step=cfg.t_his)
+    )
+    for data, metadata in data_gen_multi_test:
         num_samples += 1
         data_group.append(data)
+        if has_sequence_ids:
+            sequence_ids.append(int(metadata))
     data_group = np.concatenate(data_group, axis=0)
     all_data = data_group[..., 1:, :].reshape(data_group.shape[0], data_group.shape[1], -1)
     gt_group = all_data[:, cfg.t_his:, :]
@@ -135,7 +142,8 @@ def get_multimodal_gt_full(logger, dataset_multi_test, args, cfg):
     return {'traj_gt_arr': traj_gt_arr,
             'data_group': data_group,
             'gt_group': gt_group,
-            'num_samples': num_samples}
+            'num_samples': num_samples,
+            'sequence_ids': np.asarray(sequence_ids, dtype=np.int64) if has_sequence_ids else None}
 
 
 def display_exp_setting(logger, cfg):

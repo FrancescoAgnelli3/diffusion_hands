@@ -24,6 +24,7 @@ if str(_ROOT) not in sys.path:
 
 from common.evaluation import save_eval_samples_npz
 from common.metrics import humanmac_metrics_prefixed
+from common.model_profiling import profile_once
 from models.motion_pred_ours import get_model
 from utils.util import absolute2relative_torch, get_dct_matrix
 
@@ -810,6 +811,7 @@ def main() -> None:
     humanmac_pred_batches = []
     humanmac_tgt_batches = []
     humanmac_context_batches = []
+    humanmac_sequence_batches = []
     saved_obs = []
     saved_tgt = []
     saved_pred = []
@@ -821,6 +823,28 @@ def main() -> None:
                 batch, t_his=t_his, t_pred=t_pred, n_pre=n_pre, dct_m=dct_m, device=device
             )
             bsz = int(inp_dct.shape[0])
+            profile_once(
+                key="gsps_sampling",
+                model_name="gsps",
+                modules=[model],
+                sample_fn=lambda: _sample_predictions(
+                    model,
+                    inp_dct=inp_dct[:1],
+                    idct_m=idct_m,
+                    t_his=t_his,
+                    t_pred=t_pred,
+                    nk=nk,
+                    nz=nz,
+                    n_parts=len(parts),
+                    seed=seed + 10000019 + bidx,
+                    cartesian=False,
+                    return_total=False,
+                ),
+                sampling_steps=1,
+                batch_size=1,
+                num_candidates=nk,
+                notes="Single-pass GSPS generator",
+            )
             pred_nr_flat = _sample_predictions(
                 model,
                 inp_dct=inp_dct,
@@ -850,6 +874,9 @@ def main() -> None:
             humanmac_pred_batches.append(pred_full.permute(1, 0, 2, 3, 4).detach().cpu())
             humanmac_tgt_batches.append(gt_full.detach().cpu())
             humanmac_context_batches.append(conditioning_context_full.detach().cpu())
+            if (len(batch) > 3 and isinstance(batch[3], dict)
+                    and torch.is_tensor(batch[3].get("sequence_id"))):
+                humanmac_sequence_batches.append(batch[3]["sequence_id"].detach().cpu().long().view(-1))
             pred_first_all = pred_full[0]
             gt_first = gt_full[0]
             obs_first = conditioning_context_full[0]
@@ -867,6 +894,8 @@ def main() -> None:
         gt_future=torch.cat(humanmac_tgt_batches, dim=0),
         conditioning_context=torch.cat(humanmac_context_batches, dim=0),
         threshold=threshold,
+        sequence_ids=(torch.cat(humanmac_sequence_batches, dim=0)
+                      if humanmac_sequence_batches else None),
     )
 
     metrics = {

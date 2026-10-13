@@ -1,0 +1,33 @@
+# Fixed-horizon forecasting suite. The base experiment supplies the dataset,
+# split, preprocessing, enabled models, and metric protocol.
+base_config: experiment.yaml
+gpu_index: 1
+num_candidates: 20
+data_seed: 0
+evaluation_split: test
+card_k_low_reserve: 10
+# Cap the source samples selected for each dataset/action cohort. The runner
+# forwards this limit to every model backend so the bound is enforced
+# consistently.
+max_samples_per_dataset_action: 2000
+experiments:
+  E1:
+    input_n: 30
+    output_n: 10
+    objective: short-term forecasting
+  E2:
+    input_n: 30
+    output_n: 30
+    objective: main benchmark
+  E3:
+    input_n: 30
+    output_n: 60
+    objective: long-term forecasting
+  E4:
+    input_n: 15
+    output_n: 30
+    objective: short context
+  E5:
+    input_n: 60
+    output_n: 30
+    objective: long context

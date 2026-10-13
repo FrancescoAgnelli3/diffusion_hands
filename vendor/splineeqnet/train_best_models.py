@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import math
 import os
@@ -150,11 +151,19 @@ def _build_dataset_cfg(
         batch_size=batch_size,
         eval_batch_mult=eval_mult,
         seed=seed,
+        data_seed=_coerce_optional(best_cfg.get("data_seed"), int),
         wrist_indices=wrist_indices,
         dataset=dataset_name,
         node_count=node_count,
         edge_index=edge_index,
         adjacency=adjacency,
+        max_source_files=max(0, _coerce_required(best_cfg.get("max_source_files"), int, default=0)),
+        balanced_action_sampling=bool(
+            _coerce_required(best_cfg.get("balanced_action_sampling"), bool, default=False)
+        ),
+        use_official_splits=bool(
+            _coerce_required(best_cfg.get("use_official_splits"), bool, default=False)
+        ),
     )
 
 
@@ -190,6 +199,17 @@ def _build_train_cfg(
         early_stopping_warmup=_coerce_required(best_cfg.get("early_stopping_warmup"), int, default=0),
         early_stopping_monitor=_coerce_required(best_cfg.get("early_stopping_monitor"), str, default="auto"),
     )
+    cfg.per_action_metrics_path = str(best_cfg.get("per_action_metrics_path", "") or "")
+    cfg.explainability_output_dir = str(best_cfg.get("explainability_output_dir", "") or "")
+    cfg.card_explainability_enabled = bool(best_cfg.get("card_explainability_enabled", False))
+    cfg.card_explainability_steps = _coerce_required(
+        best_cfg.get("card_explainability_steps"), int, default=25
+    )
+    cfg.result_model_name = str(best_cfg.get("result_model_name", "") or "")
+    cfg.card_variant = str(best_cfg.get("card_variant", "card") or "card").strip().lower()
+    cfg.proposal_options = dict(best_cfg.get("proposal_options", {}) or {})
+    cfg.use_lr_scheduler = bool(best_cfg.get("use_lr_scheduler", True))
+    cfg.protocol_audit_path = str(best_cfg.get("protocol_audit_path", ""))
 
     cfg.dct_keep_coeffs = _coerce_optional(best_cfg.get("dct_keep_coeffs"), int)
     cfg.simlpe_norm_axis = _coerce_optional(best_cfg.get("simlpe_norm_axis"), str)
@@ -287,6 +307,37 @@ def _build_train_cfg(
     cfg.card_coarse_target_lowpass_only = _coerce_optional(
         best_cfg.get("card_coarse_target_lowpass_only"), bool
     )
+    cfg.card_use_latent_variability = _coerce_optional(
+        best_cfg.get("card_use_latent_variability"), bool
+    )
+    cfg.card_latent_dim = _coerce_optional(best_cfg.get("card_latent_dim"), int)
+    cfg.card_beta_kl = _coerce_optional(best_cfg.get("card_beta_kl"), float)
+    cfg.card_kl_anneal_steps = _coerce_optional(best_cfg.get("card_kl_anneal_steps"), int)
+    cfg.card_latent_encoder_hidden_dim = _coerce_optional(
+        best_cfg.get("card_latent_encoder_hidden_dim"), int
+    )
+    cfg.card_latent_conditioning_mode = _coerce_optional(
+        best_cfg.get("card_latent_conditioning_mode"), str
+    )
+    cfg.card_num_actions = _coerce_optional(best_cfg.get("card_num_actions"), int)
+    cfg.card_latent_baseline_pretrain_epochs = _coerce_optional(
+        best_cfg.get("card_latent_baseline_pretrain_epochs"), int
+    )
+    cfg.card_latent_warmup_epochs = _coerce_optional(
+        best_cfg.get("card_latent_warmup_epochs"), int
+    )
+    cfg.card_latent_joint_lr_scale = _coerce_optional(
+        best_cfg.get("card_latent_joint_lr_scale"), float
+    )
+    cfg.card_explainable_latent_decomposition = _coerce_optional(
+        best_cfg.get("card_explainable_latent_decomposition"), bool
+    )
+    cfg.card_latent_action_dim = _coerce_optional(best_cfg.get("card_latent_action_dim"), int)
+    cfg.card_latent_style_dim = _coerce_optional(best_cfg.get("card_latent_style_dim"), int)
+    cfg.card_latent_residual_dim = _coerce_optional(best_cfg.get("card_latent_residual_dim"), int)
+    cfg.card_beta_action = _coerce_optional(best_cfg.get("card_beta_action"), float)
+    cfg.card_beta_adversarial = _coerce_optional(best_cfg.get("card_beta_adversarial"), float)
+    cfg.card_grl_anneal_steps = _coerce_optional(best_cfg.get("card_grl_anneal_steps"), int)
     cfg.card_graph_laplacian_tau = _coerce_optional(best_cfg.get("card_graph_laplacian_tau"), float)
     cfg.card_covariance_jitter = _coerce_optional(best_cfg.get("card_covariance_jitter"), float)
     return cfg
@@ -294,6 +345,47 @@ def _build_train_cfg(
 
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+def _append_per_action_metrics(
+    path: str,
+    *,
+    ds_cfg: DatasetCfg,
+    train_cfg: TrainCfg,
+    metrics: Dict[str, object],
+) -> None:
+    by_action = metrics.get("validation_by_action")
+    if not path or not isinstance(by_action, dict) or not by_action:
+        return
+    fields = [
+        "timestamp", "dataset", "split", "action", "model", "samples",
+        "APD", "ADE", "FDE", "MMADE", "MMFDE", "CMD", "FID",
+    ]
+    metric_map = {
+        "APD": "humanmac_apd", "ADE": "humanmac_ade", "FDE": "humanmac_fde",
+        "MMADE": "humanmac_mmade", "MMFDE": "humanmac_mmfde",
+        "CMD": "humanmac_cmd", "FID": "humanmac_fid",
+    }
+    _ensure_dir(os.path.dirname(path) or ".")
+    write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+    with open(path, "a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if write_header:
+            writer.writeheader()
+        for action_name in sorted(by_action):
+            action_metrics = by_action[action_name]
+            if not isinstance(action_metrics, dict):
+                continue
+            row = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "dataset": ds_cfg.dataset,
+                "split": "test",
+                "action": action_name,
+                "model": train_cfg.result_model_name or train_cfg.model,
+                "samples": int(float(action_metrics.get("samples", 0))),
+            }
+            row.update({name: float(action_metrics.get(key, float("nan"))) for name, key in metric_map.items()})
+            writer.writerow(row)
 
 
 def _write_results_row(results_csv: str, row: Dict[str, object]) -> None:
@@ -324,7 +416,7 @@ def _append_window_horizon(path: str, window: int, horizon: int) -> str:
 def _prepare_result_row(ds_cfg: DatasetCfg, train_cfg: TrainCfg, metrics: Dict[str, float]) -> Dict[str, object]:
     base = {
         "timestamp": int(time.time()),
-        "model": train_cfg.model,
+        "model": train_cfg.result_model_name or train_cfg.model,
         "dataset": ds_cfg.dataset,
         "seed": ds_cfg.seed,
         "input_n": ds_cfg.input_n,
@@ -440,7 +532,11 @@ def main():
     metadata = get_dataset_metadata(dataset_name)
 
     data_dir = args.data_dir or metadata.get("default_dir", "")
-    action_filter = args.action_filter or metadata.get("default_action_filter", "")
+    action_filter_arg = str(args.action_filter or "").strip()
+    if action_filter_arg.lower() in {"all", "*"}:
+        action_filter = ""
+    else:
+        action_filter = action_filter_arg or metadata.get("default_action_filter", "")
     default_wrist_indices: Tuple[int, ...] = tuple(metadata.get("default_wrist_indices", ()))
     if not default_wrist_indices:
         raise SystemExit("Dataset metadata must define default wrist indices.")
@@ -491,6 +587,7 @@ def main():
             train_cfg = _build_train_cfg(best_cfg, epochs_override=args.epochs, model_name=model_name)
             # Ensure the model field reflects the current target model
             train_cfg.model = model_name
+            ds_cfg.include_action_labels = model_name == "card"
             train_cfg.save_eval_examples = bool(args.save_eval_examples)
             if args.eval_examples_path:
                 train_cfg.eval_examples_path = str(args.eval_examples_path)
@@ -518,6 +615,13 @@ def main():
                 train_cfg.card_cond_use_coarse = False
 
             train_dataset, val_dataset, test_dataset = build_datasets(ds_cfg)
+            if best_cfg.get("protocol_audit_path"):
+                from common.research_protocol import audit_datasets
+                audit_datasets(
+                    (train_dataset, val_dataset, test_dataset),
+                    best_cfg["protocol_audit_path"],
+                    reference_path=best_cfg.get("protocol_reference_path"),
+                )
             train_loader, val_loader, test_loader = make_loaders(
                 train_dataset, val_dataset, test_dataset, ds_cfg.batch_size, ds_cfg.seed, ds_cfg.eval_batch_mult
             )
@@ -555,6 +659,13 @@ def main():
             )
             if metrics is None:
                 raise RuntimeError("Training failed to produce metrics.")
+
+            _append_per_action_metrics(
+                train_cfg.per_action_metrics_path,
+                ds_cfg=ds_cfg,
+                train_cfg=train_cfg,
+                metrics=metrics,
+            )
 
             row = _prepare_result_row(ds_cfg, train_cfg, metrics)
             _write_results_row(results_csv_path, row)

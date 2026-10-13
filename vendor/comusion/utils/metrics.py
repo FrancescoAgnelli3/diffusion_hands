@@ -58,13 +58,21 @@ def HUMANMAC_METRICS(pred_candidates, gt_future, conditioning_context, threshold
     )
 
 
-def SPLINEEQNET_DIFFUSION_BATCH_EVAL(pred_candidates, gt_future, conditioning_context, norm_factor, threshold=0.5):
+def SPLINEEQNET_DIFFUSION_BATCH_EVAL(
+    pred_candidates,
+    gt_future,
+    conditioning_context,
+    norm_factor,
+    threshold=0.5,
+    sequence_ids=None,
+):
     return _common_splineeqnet_diffusion_batch_eval(
         pred_candidates,
         gt_future,
         conditioning_context=conditioning_context,
         norm_factor=norm_factor,
         threshold=threshold,
+        sequence_ids=sequence_ids,
     )
 
 

@@ -1,0 +1,36 @@
+seed: 0
+gpu_index: 1
+num_candidates: 10
+humanmac_multimodal_threshold: 7.0
+save_model: true
+
+# Keep these values unchanged between training and the paired Bayesian test.
+preprocessing:
+  input_n: 70
+  output_n: 30
+  stride: 5
+  time_interp: null
+  window_norm: null
+  eval_batch_mult: 1
+
+# Edit the root if AssemblyHands is installed elsewhere.
+data_roots:
+  assembly: /mnt/pve/Turing-Storage2/AssemblyHands/assembly101-download-scripts/data_our/
+
+datasets: [assembly]
+action_filter: [pick_up_screwd]
+
+runtime:
+  output_root: ./results
+  aggregate_csv: ./results/card_variants_vs_comusion_metrics.csv
+  per_action_csv: ./results/card_variants_vs_comusion_by_action.csv
+
+models:
+  card:
+    enabled: true
+  star_hand:
+    enabled: true
+  fihard:
+    enabled: true
+  comusion:
+    enabled: true

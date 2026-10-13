@@ -1,10 +1,17 @@
 import torch
 import os
+import sys
 import yaml
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from .core import DiffusionManager
 from .inference_utils import create_model, load_model_config_exp
 from .utils.load import load_model_checkpoint
+from common.model_profiling import profile_once
 
 
 def load_model_config_exp_autoenc(checkpoint_path):
@@ -115,10 +122,38 @@ def decode_latent_pred(obs, latent_pred, z_past, model, num_samples=50,  pred_le
     
     return pred
     
-def get_prediction(obs, model, num_samples=50, pred_length=100, **kwargs):
+def _get_prediction_impl(obs, model, num_samples=50, pred_length=100, **kwargs):
     lat_pred, z_past = get_diffusion_latent_codes(obs, model, num_samples=num_samples, **kwargs)
     pred = decode_latent_pred(obs, lat_pred, z_past, model, num_samples=num_samples, pred_length=pred_length, **kwargs)
     return pred
+
+
+def get_prediction(obs, model, num_samples=50, pred_length=100, **kwargs):
+    autoencoder, diffusion = model
+    diffusion_impl = diffusion.module if isinstance(diffusion, torch.nn.DataParallel) else diffusion
+    profile_once(
+        key="skeletondiffusion_sampling",
+        model_name="skeletondiffusion",
+        modules=[autoencoder, diffusion],
+        sample_fn=lambda: _get_prediction_impl(
+            obs[:1],
+            model,
+            num_samples=num_samples,
+            pred_length=pred_length,
+            **kwargs,
+        ),
+        sampling_steps=int(diffusion_impl.sampling_timesteps),
+        batch_size=1,
+        num_candidates=num_samples,
+        notes="Latent diffusion plus autoencoder decoder",
+    )
+    return _get_prediction_impl(
+        obs,
+        model,
+        num_samples=num_samples,
+        pred_length=pred_length,
+        **kwargs,
+    )
 
 
 def process_evaluation_pair(skeleton, target, pred_dict):
@@ -132,5 +167,3 @@ def process_evaluation_pair(skeleton, target, pred_dict):
     # batch_size, n_samples, seq_length, num_joints, features = pred.shape
     assert features == 3 and list(target.shape) == [batch_size, seq_length, num_joints, features]
     return target, pred, mm_gt, obs
-   
- 

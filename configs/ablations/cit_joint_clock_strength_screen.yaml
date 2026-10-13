@@ -1,0 +1,106 @@
+# Seed-0 screening for the joint grip-clock coupling strength.
+# Run the selected strength over seeds 0/1/2 only after this screening.
+seeds: [0]
+data_seed: 0
+evaluation_split: test
+gpu_index: 0
+num_candidates: 10
+humanmac_multimodal_threshold: auto
+humanmac_multimodal_calibration:
+  k: 5
+  max_samples: 4096
+  chunk_size: 128
+save_model: true
+datasets: [assembly]
+action_filter: pick_up_screwd
+data_roots:
+  assembly: /mnt/pve/Turing-Storage2/AssemblyHands/assembly101-download-scripts/data_our/
+preprocessing:
+  input_n: 70
+  output_n: 30
+  stride: 10
+  time_interp: null
+  window_norm: null
+  eval_batch_mult: 1
+shared_model_config: ../models/card.yaml
+shared_train:
+  epochs: 100
+  early_stopping:
+    enabled: false
+shared_defaults:
+  batch_size: 256
+  lr: 0.001
+  card_diffusion_epochs: 200
+  card_ddim_steps: 25
+  card_freeze_coarse: true
+  card_diffusion_coarse_warmup_epochs: 0
+  card_cond_use_history: true
+  card_cond_use_coarse: true
+  card_use_latent_variability: false
+  card_explainable_latent_decomposition: false
+  card_diffusion_only: false
+  card_dropout: 0.0
+  use_lr_scheduler: false
+  max_source_files: 0
+  balanced_action_sampling: true
+  use_official_splits: true
+  save_eval_examples: true
+models:
+  cit_linear:
+    enabled: true
+    base_model: cit
+    proposal_options:
+      propagation: linear
+      max_persistence: 0.98
+      scale_floor: 0.0001
+      terminal_kinematic_projection: false
+      grip_phase_transport: false
+    notes: Paired CIT-linear baseline
+  cit_grip_joint_s010:
+    enabled: true
+    base_model: cit
+    proposal_options:
+      propagation: linear
+      max_persistence: 0.98
+      scale_floor: 0.0001
+      terminal_kinematic_projection: true
+      grip_phase_transport: true
+      grip_clock_hidden_dim: 128
+      grip_clock_loss_weight: 0.1
+      grip_phase_strength: 1.0
+      grip_clock_conditioning: true
+      grip_joint_shared_noise: true
+      grip_joint_noise_strength: 0.10
+    notes: Joint grip-clock copula with coupling strength 0.10
+  cit_grip_joint_s020:
+    enabled: true
+    base_model: cit
+    proposal_options:
+      propagation: linear
+      max_persistence: 0.98
+      scale_floor: 0.0001
+      terminal_kinematic_projection: true
+      grip_phase_transport: true
+      grip_clock_hidden_dim: 128
+      grip_clock_loss_weight: 0.1
+      grip_phase_strength: 1.0
+      grip_clock_conditioning: true
+      grip_joint_shared_noise: true
+      grip_joint_noise_strength: 0.20
+    notes: Joint grip-clock copula with coupling strength 0.20
+  cit_grip_joint_s035:
+    enabled: true
+    base_model: cit
+    proposal_options:
+      propagation: linear
+      max_persistence: 0.98
+      scale_floor: 0.0001
+      terminal_kinematic_projection: true
+      grip_phase_transport: true
+      grip_clock_hidden_dim: 128
+      grip_clock_loss_weight: 0.1
+      grip_phase_strength: 1.0
+      grip_clock_conditioning: true
+      grip_joint_shared_noise: true
+      grip_joint_noise_strength: 0.35
+    notes: Joint grip-clock copula with coupling strength 0.35

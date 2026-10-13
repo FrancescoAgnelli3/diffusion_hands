@@ -42,12 +42,14 @@ def _compute_humanmac_metrics(
     conditioning_context: torch.Tensor,
     *,
     threshold: float,
+    sequence_ids: torch.Tensor | None = None,
 ) -> Dict[str, float]:
     return _common_humanmac_metrics_prefixed(
         pred_candidates=pred_candidates,
         gt_future=gt_future,
         conditioning_context=conditioning_context,
         threshold=threshold,
+        sequence_ids=sequence_ids,
     )
 
 
@@ -163,6 +165,7 @@ def compute_metrics_assembly(
     humanmac_pred_batches = []
     humanmac_tgt_batches = []
     humanmac_context_batches = []
+    humanmac_sequence_batches = []
 
     for batch in eval_loader:
         if not isinstance(batch, (list, tuple)) or len(batch) < 3:
@@ -200,6 +203,9 @@ def compute_metrics_assembly(
         humanmac_pred_batches.append(pred_humanmac)
         humanmac_tgt_batches.append(target_m.detach().cpu())
         humanmac_context_batches.append(data_m.detach().cpu())
+        if (len(batch) > 3 and isinstance(batch[3], dict)
+                and torch.is_tensor(batch[3].get("sequence_id"))):
+            humanmac_sequence_batches.append(batch[3]["sequence_id"].detach().cpu().long().view(-1))
 
     if total_samples == 0:
         raise RuntimeError("Assembly evaluation produced zero samples.")
@@ -209,6 +215,8 @@ def compute_metrics_assembly(
         gt_future=torch.cat(humanmac_tgt_batches, dim=0),
         conditioning_context=torch.cat(humanmac_context_batches, dim=0),
         threshold=threshold,
+        sequence_ids=(torch.cat(humanmac_sequence_batches, dim=0)
+                      if humanmac_sequence_batches else None),
     )
     eval_samples_path = config.get("eval_samples_path")
     if eval_samples_path:

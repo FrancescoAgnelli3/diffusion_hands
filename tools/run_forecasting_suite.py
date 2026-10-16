@@ -51,6 +51,11 @@ def main() -> int:
     parser.add_argument("--suite-config", type=Path, default=ROOT / "configs" / "forecasting_suite.yaml")
     parser.add_argument("--base-config", type=Path, help="Override the base experiment config")
     parser.add_argument("--output-root", type=Path, help="Suite output directory; defaults to a timestamped directory")
+    parser.add_argument(
+        "--gpu-index",
+        type=int,
+        help="Override the GPU index specified by the suite or base configuration",
+    )
     parser.add_argument("--experiments", nargs="+", choices=["E1", "E2", "E3", "E4", "E5"])
     parser.add_argument(
         "--keep-going",
@@ -93,7 +98,11 @@ def main() -> int:
             raise ValueError(f"{name}: input_n and output_n must be positive")
 
         cfg = copy.deepcopy(base)
-        cfg["gpu_index"] = int(suite.get("gpu_index", cfg.get("gpu_index", 1)))
+        cfg["gpu_index"] = (
+            int(args.gpu_index)
+            if args.gpu_index is not None
+            else int(suite.get("gpu_index", cfg.get("gpu_index", 1)))
+        )
         cfg["num_candidates"] = int(suite.get("num_candidates", 20))
         cfg["data_seed"] = int(suite.get("data_seed", cfg.get("data_seed", 0)))
         cfg["evaluation_split"] = str(suite.get("evaluation_split", cfg.get("evaluation_split", "test")))

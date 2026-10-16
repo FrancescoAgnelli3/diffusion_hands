@@ -76,6 +76,31 @@ def _deep_merge_dicts(base: dict, override: dict) -> dict:
     return merged
 
 
+_CIT_DEFAULT_ALIASES = {
+    # CIT is executed through the shared CARD-family runner, but these controls
+    # belong to CIT's coarse/transport model rather than CARD diffusion.
+    "cit_coarse_k_low": "card_k_low",
+    "cit_transport_epochs": "card_diffusion_epochs",
+    "cit_sampling_steps": "card_ddim_steps",
+    "cit_denoiser_heads": "card_denoiser_heads",
+}
+
+
+def _normalize_cit_defaults(defaults: dict) -> dict:
+    """Translate public CIT option names to legacy shared-runner keys.
+
+    Existing experiment files may retain the old spellings.  The public CIT
+    spelling wins when it overlays a shared CARD-family base configuration.
+    """
+    normalized = dict(defaults)
+    for public_key, legacy_key in _CIT_DEFAULT_ALIASES.items():
+        if public_key not in normalized:
+            continue
+        value = normalized.pop(public_key)
+        normalized[legacy_key] = value
+    return normalized
+
+
 def _run(cmd: List[str], cwd: Path, env: Optional[dict] = None, log_path: Optional[str] = None) -> int:
     print(f"[CMD] ({cwd}) {' '.join(cmd)}")
     if log_path:
@@ -496,6 +521,8 @@ def run_card(model_name: str, dataset: str, data_dir: Path, action_filter: str, 
     best_cfg = deepcopy(_as_dict(mcfg.get("defaults")))
     if not best_cfg:
         raise RuntimeError(f"Missing models.{model_name}.defaults in experiment model YAML.")
+    if base_model == "cit":
+        best_cfg = _normalize_cit_defaults(best_cfg)
     best_cfg["model"] = target_model
     if target_model == "card":
         best_cfg["card_variant"] = base_model

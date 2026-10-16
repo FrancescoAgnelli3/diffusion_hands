@@ -27,7 +27,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 from run_all_models import (CANONICAL_METRIC_KEYS, _deep_merge_dicts, _load_yaml,
                             _resolve_action_filters, _resolve_data_roots,
                             _resolve_datasets, _resolve_multimodal_threshold,
-                            _resolve_shared_preprocessing, run_card)
+                            _resolve_shared_preprocessing, _normalize_cit_defaults,
+                            run_card)
 
 
 def write_json(path, data):
@@ -52,6 +53,13 @@ def resolve_plan(path, selected_models=None, seeds=None):
         raise ValueError("evaluation_split must be 'validation' or 'test'")
     base = _load_yaml((path.parent / cfg["shared_model_config"]).resolve())
     defaults = _deep_merge_dicts(base["defaults"], cfg.get("shared_defaults", {}))
+    enabled_base_models = {
+        str(spec.get("base_model", "")).strip().lower()
+        for spec in cfg.get("models", {}).values()
+        if spec.get("enabled", True)
+    }
+    if "cit" in enabled_base_models and "card" not in enabled_base_models:
+        defaults = _normalize_cit_defaults(defaults)
     cfg.setdefault("data_seed", 0)
     defaults["data_seed"] = int(cfg["data_seed"])
     train = _deep_merge_dicts(base.get("train", {}), cfg.get("shared_train", {}))

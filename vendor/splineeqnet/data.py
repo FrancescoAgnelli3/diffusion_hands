@@ -480,6 +480,45 @@ def collect_sequences_from_files_wrist_centered(
     return seqs
 
 
+def filter_unusable_bighands_source_files(
+    files: List[str],
+    *,
+    node_count: int,
+    hand_groups: Tuple[dict, ...],
+    window_norm: int,
+    split_hands: bool,
+) -> List[str]:
+    """Drop BigHands files that cannot yield a valid forecasting sequence.
+
+    BigHands source files do not carry official split labels.  If an invalid
+    file is assigned to the (often one-file) validation split, source-file
+    splitting succeeds but dataset construction later produces an empty
+    validation set.  Validate these small source collections before splitting
+    so every model seed uses viable files.
+    """
+    usable: List[str] = []
+    skipped: List[str] = []
+    for path in files:
+        sequences = collect_sequences_from_files_wrist_centered(
+            [path],
+            node_count=node_count,
+            hand_groups=hand_groups,
+            dataset="bighands",
+            window_norm=window_norm,
+            split_hands=split_hands,
+        )
+        if sequences:
+            usable.append(path)
+        else:
+            skipped.append(path)
+    if skipped:
+        print(
+            "Skipped %d BigHands source file(s) with no usable sequences: %s"
+            % (len(skipped), ", ".join(os.path.basename(path) for path in skipped))
+        )
+    return usable
+
+
 # ----------------------------
 # Dataset building / loaders (unchanged except split flags passthrough)
 # ----------------------------
@@ -545,6 +584,19 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
             f"balanced={bool(getattr(ds_cfg, 'balanced_action_sampling', False))})."
         )
 
+    input_n = int(ds_cfg.input_n)
+    output_n = int(ds_cfg.output_n)
+    window_norm = int(ds_cfg.window_norm) if ds_cfg.window_norm is not None else input_n
+    split_hands = bool(getattr(ds_cfg, "split_hands", True))
+    if str(ds_cfg.dataset).lower() == "bighands":
+        files = filter_unusable_bighands_source_files(
+            files,
+            node_count=node_count_full,
+            hand_groups=hand_groups,
+            window_norm=window_norm,
+            split_hands=split_hands,
+        )
+
     include_action_labels = bool(getattr(ds_cfg, "include_action_labels", False))
     action_to_id: Optional[Dict[str, int]] = None
     if include_action_labels:
@@ -586,12 +638,6 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
         f"Source-file splits: train={len(train_files)} val={len(val_files)} test={len(test_files)} "
         f"official={bool(getattr(ds_cfg, 'use_official_splits', False))}."
     )
-
-    input_n = int(ds_cfg.input_n)
-    output_n = int(ds_cfg.output_n)
-    window_norm = int(ds_cfg.window_norm) if ds_cfg.window_norm is not None else input_n
-
-    split_hands = bool(getattr(ds_cfg, "split_hands", True))
 
     train_sequences = collect_sequences_from_files_wrist_centered(
         train_files,

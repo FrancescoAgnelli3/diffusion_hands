@@ -49,58 +49,38 @@ models:
   gsps:
     enabled: true
   cit_linear:
+    enabled: true
     config_path: models/cit.yaml
     base_model: cit
-    defaults:
-      proposal_options:
-        propagation: linear
-        max_persistence: 0.98
-        scale_floor: 0.0001
-        terminal_kinematic_projection: false
-        grip_phase_transport: false
     notes: CIT linear causal-innovation transport baseline
   cit_grip_phase_soft:
+    enabled: true
     config_path: models/cit.yaml
     base_model: cit
     defaults:
       proposal_options:
-        propagation: linear
-        max_persistence: 0.98
-        scale_floor: 0.0001
         terminal_kinematic_projection: true
         grip_phase_transport: true
-        grip_clock_hidden_dim: 128
-        grip_clock_loss_weight: 0.1
         grip_phase_strength: 0.5
-        grip_clock_conditioning: false
     notes: Half-strength grip phase warp
   cit_grip_phase_coupled:
+    enabled: true
     config_path: models/cit.yaml
     base_model: cit
     defaults:
       proposal_options:
-        propagation: linear
-        max_persistence: 0.98
-        scale_floor: 0.0001
         terminal_kinematic_projection: true
         grip_phase_transport: true
-        grip_clock_hidden_dim: 128
-        grip_clock_loss_weight: 0.1
-        grip_phase_strength: 1.0
         grip_clock_conditioning: true
     notes: Full grip phase warp with clock conditioning
   cit_grip_phase_coupled_soft:
+    enabled: true
     config_path: models/cit.yaml
     base_model: cit
     defaults:
       proposal_options:
-        propagation: linear
-        max_persistence: 0.98
-        scale_floor: 0.0001
         terminal_kinematic_projection: true
         grip_phase_transport: true
-        grip_clock_hidden_dim: 128
-        grip_clock_loss_weight: 0.1
         grip_phase_strength: 0.5
         grip_clock_conditioning: true
     notes: Half-strength grip phase warp with clock conditioning

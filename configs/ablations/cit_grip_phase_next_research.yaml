@@ -33,8 +33,8 @@ shared_train:
 shared_defaults:
   batch_size: 256
   lr: 0.001
-  card_diffusion_epochs: 200
-  card_ddim_steps: 25
+  cit_transport_epochs: 200
+  cit_sampling_steps: 25
   card_freeze_coarse: true
   card_diffusion_coarse_warmup_epochs: 0
   card_cond_use_history: true

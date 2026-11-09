@@ -1,4 +1,4 @@
-"""Grip-phase clock and temporal resampling for CIT ablations."""
+"""Fixed coupled-soft grip-phase clock and temporal resampling for CIT."""
 from __future__ import annotations
 
 import math
@@ -8,7 +8,7 @@ from torch import nn
 TIPS = (0, 1, 2, 3, 4)
 
 
-def grip_observables(pose):
+def grip_observables(pose, descriptor="full"):
     """Rotation/translation-invariant distances describing hand closure."""
     thumb = pose[..., TIPS[0], :]
     fingers = pose[..., list(TIPS[1:]), :]
@@ -17,19 +17,40 @@ def grip_observables(pose):
     wrist_distances = (pose[..., list(TIPS), :]-wrist).norm(dim=-1)
     adjacent = (pose[..., list(TIPS[:-1]), :]
                 - pose[..., list(TIPS[1:]), :]).norm(dim=-1)
-    return torch.cat((thumb_distances, wrist_distances, adjacent), dim=-1)
+    if descriptor == "full":
+        return torch.cat((thumb_distances, wrist_distances, adjacent), dim=-1)
+    if descriptor == "fingertip_distances":
+        return thumb_distances
+    raise ValueError(f"Unknown grip-phase descriptor: {descriptor}")
 
 
-def grip_phase(history, future, floor=1e-4, strength=1.0):
-    previous = grip_observables(history[:, -1:])
-    current = grip_observables(future)
+def grip_phase(history, future, floor=1e-4, strength=0.5, descriptor="full"):
+    """Return a monotone phase clock and centred increment logits.
+
+    ``strength=0`` is physical-time flow and ``strength=1`` is full phase
+    alignment.  The default preserves the published coupled-soft model.
+    """
+    if not 0.0 <= float(strength) <= 1.0:
+        raise ValueError("grip phase strength must be in [0, 1]")
+    if descriptor == "joint_displacement":
+        previous, current = history[:, -1:], future
+    else:
+        previous = grip_observables(history[:, -1:], descriptor)
+        current = grip_observables(future, descriptor)
     sequence = torch.cat((previous, current), dim=1)
-    speed = (sequence[:, 1:]-sequence[:, :-1]).square().sum(-1).sqrt()
+    displacement = sequence[:, 1:]-sequence[:, :-1]
+    if descriptor == "joint_displacement":
+        # A phase clock has one value per frame, not one value per joint.
+        # Aggregate the Euclidean displacement of the entire hand into a
+        # scalar speed before normalising it into temporal increments.
+        speed = displacement.square().sum(dim=(-1, -2)).sqrt()
+    else:
+        speed = displacement.square().sum(-1).sqrt()
     adaptive_floor = floor * speed.mean(1, keepdim=True).clamp_min(1.0)
     increments = speed + adaptive_floor
     increments = increments / increments.sum(1, keepdim=True).clamp_min(1e-8)
     uniform = torch.full_like(increments, 1.0/increments.size(1))
-    phase = ((1-strength)*uniform+strength*increments).cumsum(1)
+    phase = ((1-float(strength))*uniform+float(strength)*increments).cumsum(1)
     logits = increments.clamp_min(1e-8).log()
     logits = logits-logits.mean(1, keepdim=True)
     return phase, logits
@@ -102,59 +123,3 @@ class GripPhaseClock(nn.Module):
         desired = target-source
         prediction = self.field(point, time, history)
         return (prediction-desired).square().mean()
-
-    @torch.no_grad()
-    def sample_with_source(self, history, generator, steps, phase_strength=1.0,
-                           normalize_source=False):
-        point = torch.randn(history.size(0), self.pred_length, device=history.device,
-                            dtype=history.dtype, generator=generator)
-        point -= point.mean(1, keepdim=True)
-        source = point.clone()
-        if normalize_source:
-            source = source/source.square().mean(1, keepdim=True).sqrt().clamp_min(1e-6)
-            point = source.clone()
-        for step in range(steps):
-            time = history.new_full((history.size(0),), step/steps)
-            point = point+self.field(point, time, history)/steps
-            point -= point.mean(1, keepdim=True)
-        increments = torch.softmax(point, dim=1)
-        uniform = torch.full_like(increments, 1.0/increments.size(1))
-        increments = (1-phase_strength)*uniform+phase_strength*increments
-        return increments.cumsum(1), point, source
-
-    @torch.no_grad()
-    def sample(self, history, generator, steps, phase_strength=1.0):
-        phase, point, _ = self.sample_with_source(
-            history, generator, steps, phase_strength=phase_strength,
-        )
-        return phase, point
-
-
-class GripJointNoiseCoupler(nn.Module):
-    """History-conditioned low-rank copula between clock and trajectory noise."""
-    def __init__(self, input_length, pred_length, num_free, hidden=128):
-        super().__init__()
-        self.pred_length = pred_length
-        self.num_free = num_free
-        feature_dim = 9*num_free
-        self.history_encoder = nn.Sequential(
-            nn.LayerNorm(feature_dim), nn.Linear(feature_dim, hidden), nn.SiLU(),
-            nn.Linear(hidden, pred_length*num_free*3),
-        )
-
-    def basis(self, history):
-        context = GripPhaseClock.history_summary(history)
-        raw = self.history_encoder(context).reshape(
-            history.size(0), self.pred_length, self.num_free, 3,
-        )
-        return torch.tanh(raw)
-
-    def couple(self, clock_source, trajectory_noise, history, strength):
-        if not 0 < strength < 1:
-            raise ValueError("Shared grip-noise strength must lie strictly between zero and one")
-        z = clock_source-clock_source.mean(1, keepdim=True)
-        z = z/z.square().mean(1, keepdim=True).sqrt().clamp_min(1e-6)
-        basis = self.basis(history)
-        shared = z[:, :, None, None]*basis
-        private_scale = (1-strength**2*basis.square()).clamp_min(1e-6).sqrt()
-        return private_scale*trajectory_noise+strength*shared

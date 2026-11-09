@@ -14,6 +14,51 @@ from .utils.load import load_model_checkpoint
 from common.model_profiling import profile_once
 
 
+def _load_ema_diffusion_weights(diffusion, checkpoint) -> bool:
+    """Load the inference EMA stored by ``TrainerDiffusion``, when present.
+
+    The trainer checkpoints both the online model (``model``) and the EMA
+    wrapper (``ema``).  Until now inference always loaded the online model,
+    even though validation samples are drawn from ``ema.ema_model``.  This
+    made reported evaluation metrics substantially worse than the metrics used
+    while training.  ``ema-pytorch`` serializes its averaged module under the
+    ``ema_model.`` prefix, so extract that portion instead of rebuilding an EMA
+    wrapper just to load a checkpoint.
+
+    Return whether EMA weights were applied.  Older checkpoints without EMA,
+    or checkpoints from a different architecture, retain the already-loaded
+    online weights.
+    """
+    ema_checkpoint = checkpoint.get("ema") if isinstance(checkpoint, dict) else None
+    if not isinstance(ema_checkpoint, dict):
+        return False
+    # ``ema-pytorch`` creates the EMA module before its warm-up completes.
+    # Such a module is not a trained inference model yet.
+    initted = ema_checkpoint.get("initted", True)
+    if torch.is_tensor(initted):
+        initted = bool(initted.item())
+    if not bool(initted):
+        return False
+
+    prefix = "ema_model."
+    ema_state = {
+        key[len(prefix):]: value
+        for key, value in ema_checkpoint.items()
+        if key.startswith(prefix)
+    }
+    if not ema_state:
+        return False
+
+    try:
+        diffusion.load_state_dict(ema_state, strict=True)
+    except RuntimeError as exc:
+        # Do not make legacy checkpoints unusable merely because their EMA
+        # state has a different layout.  The online state was loaded first.
+        print(f"EMA diffusion state is incompatible; using online weights ({exc}).")
+        return False
+    return True
+
+
 def load_model_config_exp_autoenc(checkpoint_path):
     exp_folder = os.path.dirname(os.path.dirname(checkpoint_path))
     config_path = os.path.join(exp_folder, 'config.yaml')
@@ -77,6 +122,10 @@ def prepare_model(config, skeleton, silent=False,  **kwargs):
     # if  config['checkpoint_path'].endswith('.pth.tar'):
     #     diffusion.load_state_dict(checkpoint_diffusion)
     diffusion.load_state_dict(checkpoint_diffusion['model'])
+    if _load_ema_diffusion_weights(diffusion, checkpoint_diffusion):
+        print("Loaded EMA diffusion weights for evaluation.")
+    else:
+        print("EMA diffusion weights unavailable; using online diffusion weights.")
 
     # in case you renamed nn modules and want to update checkpoint
     # diffusion.load_state_dict(checkpoint_diffusion['model'], strict=False)

@@ -35,7 +35,11 @@ def update_config(cfg, args_dict):
     cfg.idct_m_all = cfg.idct_m.float().to(cfg.device)
 
     index = get_log_dir_index(cfg.base_dir)
-    if args_dict['mode'] == ('train' or 'pred' or 'eval'):
+    # ``('train' or 'pred' or 'eval')`` evaluates to ``'train'`` in Python,
+    # which previously sent inference-only evaluations to ``results/eval_*``.
+    # The suite adapter looks up results by their configuration id, so eval
+    # runs must use the same id-based directory convention as training.
+    if args_dict['mode'] in {'train', 'pred', 'eval'}:
         cfg.cfg_dir = '%s/%s' % (cfg.base_dir, args_dict['cfg'] + index)
     else:
         cfg.cfg_dir = '%s/%s' % (cfg.base_dir, args_dict['mode'] + index)

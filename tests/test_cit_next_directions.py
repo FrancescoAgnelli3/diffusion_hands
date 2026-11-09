@@ -48,7 +48,7 @@ class CITNextDirectionTests(unittest.TestCase):
                     num_layers=1, k_low=4, denoiser_dim=16, denoiser_depth=1,
                     denoiser_heads=4, ddim_steps=3, cond_use_history=True,
                     cond_use_coarse=True, freeze_coarse=True, propagation="linear",
-                    terminal_kinematic_projection=True)
+                    main_grip_model=True)
         args.update(options)
         return CausalInnovationForecaster(CausalInnovationConfig(**args), metadata)
 
@@ -65,13 +65,12 @@ class CITNextDirectionTests(unittest.TestCase):
     def test_grip_phase_and_resampling_contracts(self):
         history, future = hand_sequence(2, 4), hand_sequence(2, 5)
         phase, logits = grip_phase(history, future)
-        soft_phase, soft_logits = grip_phase(history, future, strength=0.5)
         self.assertTrue(torch.all(phase[:, 1:] > phase[:, :-1]))
         torch.testing.assert_close(phase[:, -1], torch.ones(2))
         torch.testing.assert_close(logits.mean(1), torch.zeros(2), atol=1e-6, rtol=0)
-        torch.testing.assert_close(soft_logits, logits)
-        uniform = torch.arange(1, 6, dtype=phase.dtype)[None]/5
-        torch.testing.assert_close(soft_phase, 0.5*uniform+0.5*phase)
+        increments = torch.softmax(logits, dim=1)
+        uniform = torch.full_like(increments, 1 / increments.size(1))
+        torch.testing.assert_close(phase, (0.5*uniform+0.5*increments).cumsum(1))
 
         # A curve linear in its own phase is invariant to canonicalize/decanonicalize.
         initial = history[:, -1]
@@ -81,54 +80,68 @@ class CITNextDirectionTests(unittest.TestCase):
         restored = from_canonical(canonical, phase, initial)
         torch.testing.assert_close(restored, physical, atol=2e-6, rtol=2e-6)
 
-    def test_clock_conditioning_preserves_common_field_initialization(self):
-        torch.manual_seed(73)
-        independent = self.model(grip_phase_transport=True, grip_clock_hidden_dim=16)
-        torch.manual_seed(73)
-        coupled = self.model(grip_phase_transport=True, grip_clock_hidden_dim=16,
-                             grip_clock_conditioning=True)
-        coupled_parameters = dict(coupled.diffusion.denoiser.named_parameters())
-        for name, parameter in independent.diffusion.denoiser.named_parameters():
-            if name.startswith("latent_") or name.startswith("proj_mamp"):
-                continue
-            torch.testing.assert_close(parameter, coupled_parameters[name])
+    def test_joint_displacement_phase_is_a_scalar_clock(self):
+        history, future = hand_sequence(2, 4), hand_sequence(2, 5)
+        phase, logits = grip_phase(history, future, descriptor="joint_displacement")
 
-    def test_each_grip_variant_calibrates_trains_samples_and_preserves_lengths(self):
-        variants = (
-            {"grip_phase_transport": True, "grip_clock_hidden_dim": 16},
-            {"grip_phase_transport": True, "grip_clock_hidden_dim": 16,
-             "grip_phase_strength": 0.5, "grip_clock_conditioning": True},
-            {"grip_phase_transport": True, "grip_clock_hidden_dim": 16,
-             "grip_clock_conditioning": True, "grip_joint_shared_noise": True,
-             "grip_joint_noise_strength": 0.35},
-        )
+        self.assertEqual(phase.shape, (2, 5))
+        self.assertEqual(logits.shape, (2, 5))
+        self.assertTrue(torch.all(phase[:, 1:] > phase[:, :-1]))
+        torch.testing.assert_close(phase[:, -1], torch.ones(2))
+        canonical = to_canonical(future, phase, history[:, -1])
+        self.assertEqual(canonical.shape, future.shape)
+
+    def test_oracle_clock_and_canonical_path_evaluation(self):
         loader = self.loader()
         raw_history, raw_future = loader.dataset.tensors
         history, future = raw_history[:2, ..., 4:], raw_future[:2, ..., 4:]
-        for options in variants:
-            with self.subTest(options=options):
-                model = self.model(**options)
-                report = model.calibrate_reference(loader)
-                self.assertEqual(report["passes"], 2)
-                self.assertEqual(report["windows_per_pass"], 5)
-                loss, _, metrics = model.diffusion_loss(history, future, return_metrics=True)
-                loss.backward()
-                self.assertTrue(torch.isfinite(loss))
-                gradients = [p.grad for p in model.diffusion.parameters() if p.grad is not None]
-                self.assertTrue(gradients and all(torch.isfinite(g).all() for g in gradients))
-                if options.get("grip_phase_transport"):
-                    self.assertIn("grip_clock_loss", metrics)
-                if options.get("grip_clock_conditioning"):
-                    self.assertIsNotNone(model.diffusion.denoiser.latent_gate.grad)
-                model.eval()
-                # The shared benchmark evaluates inside inference_mode.
-                with torch.inference_mode():
-                    prediction = model.predict(history, seed=23)
-                self.assertTrue(torch.isfinite(prediction).all())
-                predicted_lengths = model.diffusion.observed_bone_lengths(prediction)
-                observed_lengths = model.diffusion.observed_bone_lengths(history)
-                torch.testing.assert_close(predicted_lengths, observed_lengths,
-                                           atol=2e-5, rtol=2e-5)
+
+        clock_oracle = self.model(oracle_clock=True)
+        clock_oracle.calibrate_reference(loader)
+        clock_oracle.eval()
+        with torch.inference_mode():
+            prediction = clock_oracle.predict(history, seed=23, oracle_future=future)
+        self.assertEqual(prediction.shape, future.shape)
+        self.assertTrue(torch.isfinite(prediction).all())
+
+        path_oracle = self.model(oracle_clock=True, oracle_canonical_path=True)
+        path_oracle.calibrate_reference(loader)
+        path_oracle.eval()
+        with torch.inference_mode():
+            reconstruction = path_oracle.predict(history, seed=23, oracle_future=future)
+        torch.testing.assert_close(reconstruction, future)
+
+    def test_innovation_reference_variants_preserve_transport_shape(self):
+        noise = torch.randn(2, 5, 20, 3)
+        causal = self.model(innovation_reference="causal")
+        torch.testing.assert_close(causal.diffusion.reference_innovations(noise), noise)
+        for reference in ("isotropic", "variance_scaled"):
+            with self.subTest(reference=reference):
+                model = self.model(innovation_reference=reference)
+                innovations = model.diffusion.reference_innovations(noise)
+                self.assertEqual(innovations.shape, noise.shape)
+                self.assertTrue(torch.isfinite(innovations).all())
+
+    def test_main_grip_model_calibrates_trains_samples_and_preserves_lengths(self):
+        loader = self.loader()
+        raw_history, raw_future = loader.dataset.tensors
+        history, future = raw_history[:2, ..., 4:], raw_future[:2, ..., 4:]
+        model = self.model()
+        report = model.calibrate_reference(loader)
+        self.assertEqual(report["passes"], 2)
+        self.assertEqual(report["windows_per_pass"], 5)
+        loss, _, metrics = model.diffusion_loss(history, future, return_metrics=True)
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIn("grip_clock_loss", metrics)
+        self.assertIsNotNone(model.diffusion.denoiser.latent_gate.grad)
+        model.eval()
+        with torch.inference_mode():
+            prediction = model.predict(history, seed=23)
+        self.assertTrue(torch.isfinite(prediction).all())
+        predicted_lengths = model.diffusion.observed_bone_lengths(prediction)
+        observed_lengths = model.diffusion.observed_bone_lengths(history)
+        torch.testing.assert_close(predicted_lengths, observed_lengths, atol=2e-5, rtol=2e-5)
 
     def test_terminal_projection_uses_each_dataset_hand_graph(self):
         for dataset in ("h2o", "bighands", "fpha"):
@@ -139,8 +152,7 @@ class CITNextDirectionTests(unittest.TestCase):
                         "wrist_index": metadata["wrist_index"],
                         "edges": metadata["links"],
                     },
-                    grip_phase_transport=True,
-                    grip_clock_hidden_dim=16,
+                    main_grip_model=True,
                 )
                 transport = model.diffusion
                 self.assertEqual(len(transport.projection_edges), 20)
@@ -166,34 +178,6 @@ class CITNextDirectionTests(unittest.TestCase):
                     projected[:, :, transport.wrist_index],
                     torch.zeros_like(projected[:, :, transport.wrist_index]),
                 )
-
-    def test_invalid_combinations_and_full_protocol(self):
-        for options in (
-            {"grip_phase_transport": True, "grip_clock_loss_weight": 0},
-            {"grip_clock_conditioning": True},
-            {"grip_phase_transport": True, "grip_phase_strength": 0},
-        ):
-            with self.subTest(options=options), self.assertRaises(ValueError):
-                self.model(**options)
-        proposal = resolve_plan(ROOT / "configs/ablations/cit_next_directions_research.yaml")
-        next_phase = resolve_plan(ROOT / "configs/ablations/cit_grip_phase_next_research.yaml")
-        joint = resolve_plan(ROOT / "configs/ablations/cit_joint_clock_research.yaml")
-        self.assertEqual(proposal["seeds"], [0, 1, 2])
-        self.assertEqual(proposal["gpu_index"], 1)
-        self.assertEqual(set(proposal["models"]), {"cit_grip_phase"})
-        self.assertEqual(next_phase["seeds"], [0, 1, 2])
-        self.assertEqual(next_phase["gpu_index"], 0)
-        self.assertEqual(set(next_phase["models"]), {
-            "cit_grip_phase_soft", "cit_grip_phase_coupled",
-            "cit_grip_phase_coupled_soft",
-        })
-        self.assertEqual(joint["gpu_index"], 0)
-        self.assertEqual(set(joint["models"]), {
-            "cit_linear", "cit_grip_phase", "cit_grip_joint",
-        })
-        self.assertTrue(joint["models"]["cit_grip_joint"]["defaults"]["proposal_options"]
-                        ["grip_joint_shared_noise"])
-
 
 if __name__ == "__main__":
     unittest.main()

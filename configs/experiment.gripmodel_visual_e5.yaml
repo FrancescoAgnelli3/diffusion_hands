@@ -1,0 +1,49 @@
+# E5 qualitative evaluation: 60 observed frames followed by 30 forecast frames.
+seeds: [0]
+data_seed: 0
+gpu_index: 1
+num_candidates: 20
+save_model: true
+
+preprocessing:
+  input_n: 60
+  output_n: 30
+  stride: 20
+  time_interp: null
+  window_norm: null
+  eval_batch_mult: 1
+
+datasets: [assembly, bighands, h2o, fpha]
+action_filter: [remove, rotate, unscrew, pick, put, attempt]
+
+models:
+  fihard:
+    enabled: true
+    config_path: models/fihard.yaml
+  comusion:
+    enabled: true
+    config_path: models/comusion.yaml
+  dlow_cvae:
+    enabled: false
+    config_path: models/dlow_cvae.yaml
+  stars:
+    enabled: true
+    config_path: models/stars.yaml
+  cit_grip_phase_coupled_soft:
+    enabled: true
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults:
+      proposal_options:
+        main_grip_model: true
+    notes: GripModel E5 qualitative benchmark
+
+runtime:
+  output_root: ./results
+  aggregate_csv: ./results/gripmodel_visual_e5_long.csv
+  summary_csv: ./results/gripmodel_visual_e5_mean_std.csv
+  per_action_csv: ./results/gripmodel_visual_e5_by_action.csv
+
+evaluation_subset:
+  enabled: true
+  manifest_root: ./results/gripmodel_visual_e5/mobile_eval_manifests

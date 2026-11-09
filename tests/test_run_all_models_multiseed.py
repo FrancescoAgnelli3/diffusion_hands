@@ -1,7 +1,12 @@
 import csv
 
 from common.evaluation import CANONICAL_METRIC_KEYS
-from tools.run_all_models import _normalize_cit_defaults, _resolve_seeds, _write_summary_csv
+from tools.run_all_models import (
+    _humanmac_result_root,
+    _normalize_cit_defaults,
+    _resolve_seeds,
+    _write_summary_csv,
+)
 
 
 def _row(seed, status="ok"):
@@ -21,17 +26,24 @@ def test_resolve_seeds_supports_multi_seed_and_legacy_single_seed():
     assert _resolve_seeds({"seed": 7}) == [7]
 
 
+def test_humanmac_result_root_follows_run_mode(tmp_path):
+    assert _humanmac_result_root(tmp_path, "train") == tmp_path / "results"
+    assert _humanmac_result_root(tmp_path, "eval") == tmp_path / "inference"
+
+
 def test_cit_public_defaults_normalize_to_the_legacy_runner_values():
     defaults = {
         "cit_coarse_k_low": 80,
         "cit_transport_epochs": 200,
         "cit_sampling_steps": 25,
+        "cit_candidate_batch_size": 4,
         "cit_denoiser_heads": 4,
     }
     assert _normalize_cit_defaults(defaults) == {
         "card_k_low": 80,
         "card_diffusion_epochs": 200,
         "card_ddim_steps": 25,
+        "card_candidate_batch_size": 4,
         "card_denoiser_heads": 4,
     }
     assert defaults["cit_sampling_steps"] == 25  # Normalization is non-mutating.

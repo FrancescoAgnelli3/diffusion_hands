@@ -105,6 +105,9 @@ def compute_metrics_assembly(
     requested_wrist_indices = tuple(int(x) for x in config.get("assembly_wrist_indices", default_wrist_indices))
     wrist_indices = requested_wrist_indices if len(requested_wrist_indices) == len(default_wrist_indices) else default_wrist_indices
 
+    data_seed = config.get("assembly_data_seed")
+    if data_seed is None:
+        data_seed = config["seed"]
     ds_cfg = DatasetCfg(
         data_dir=data_dir,
         action_filter=action_filter,
@@ -115,7 +118,10 @@ def compute_metrics_assembly(
         window_norm=config.get("assembly_window_norm"),
         batch_size=int(batch_size),
         eval_batch_mult=int(config.get("assembly_eval_batch_mult", 1)),
-        seed=int(config["seed"]),
+        # Keep the held-out files fixed across training stages and evaluation.
+        # ``seed`` is the model/sampling seed; ``assembly_data_seed`` owns the
+        # deterministic source-file split.
+        seed=int(data_seed),
         wrist_indices=wrist_indices,
         dataset=dataset_name,
         node_count=int(metadata.get("node_count", 21)),

@@ -6,6 +6,15 @@ card_k_low_reserve: 10
 gpu_index: 1
 num_candidates: 10
 humanmac_multimodal_threshold: auto
+# The historical radius is a scaled training median. If it yields no eligible
+# held-out neighbours, preflight expands it by 10% until MMADE/MMFDE are defined.
+humanmac_multimodal_calibration:
+  k: 1
+  neighbour_retry_scale: 1.1
+  max_neighbour_retry_steps: 100
+  max_samples: 4096
+  max_test_samples: 0
+  chunk_size: 128
 save_model: true
 
 # Shared preprocessing/data window choices.
@@ -37,7 +46,7 @@ models:
   fihard:
     enabled: true
   belfusion:
-    enabled: true
+    enabled: false
   comusion:
     enabled: true
   dlow_cvae:
@@ -45,45 +54,56 @@ models:
   humanmac:
     enabled: true
   skeletondiffusion:
-    enabled: true
+    enabled: false
   gsps:
     enabled: true
-  cit_linear:
+  simlpe:
     enabled: true
-    config_path: models/cit.yaml
-    base_model: cit
-    notes: CIT linear causal-innovation transport baseline
-  cit_grip_phase_soft:
+    base_model: simlpe_dct
+  cacheflow:
     enabled: true
-    config_path: models/cit.yaml
-    base_model: cit
-    defaults:
-      proposal_options:
-        terminal_kinematic_projection: true
-        grip_phase_transport: true
-        grip_phase_strength: 0.5
-    notes: Half-strength grip phase warp
-  cit_grip_phase_coupled:
+  stars:
     enabled: true
-    config_path: models/cit.yaml
-    base_model: cit
-    defaults:
-      proposal_options:
-        terminal_kinematic_projection: true
-        grip_phase_transport: true
-        grip_clock_conditioning: true
-    notes: Full grip phase warp with clock conditioning
+  hybrid_cvae:
+    enabled: false
   cit_grip_phase_coupled_soft:
     enabled: true
     config_path: models/cit.yaml
     base_model: cit
     defaults:
       proposal_options:
-        terminal_kinematic_projection: true
-        grip_phase_transport: true
-        grip_phase_strength: 0.5
-        grip_clock_conditioning: true
-    notes: Half-strength grip phase warp with clock conditioning
+        main_grip_model: true
+    notes: Half-strength grip phase warp with fixed frame-aligned kinematic clock conditioning
+
+# models:
+#   card:
+#     enabled: false
+#   star_hand:
+#     enabled: false
+#   fihard:
+#     enabled: false
+#   belfusion:
+#     enabled: false
+#   comusion:
+#     enabled: false
+#   dlow_cvae:
+#     enabled: false
+#   humanmac:
+#     enabled: false
+#   skeletondiffusion:
+#     enabled: false
+#   gsps:
+#     enabled: false
+#   hybrid_cvae:
+#     enabled: true
+#   cit_grip_phase_coupled_soft:
+#     enabled: false
+#     config_path: models/cit.yaml
+#     base_model: cit
+#     defaults:
+#       proposal_options:
+#         main_grip_model: true
+#     notes: Half-strength grip phase warp with clock conditioning
 
 runtime:
   output_root: ./results

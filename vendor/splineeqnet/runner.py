@@ -63,6 +63,9 @@ def run_experiment(
     num_candidates: Optional[int] = None,
     humanmac_num_candidates: Optional[int] = None,
     humanmac_multimodal_threshold: float = 0.5,
+    humanmac_prediction_cache_path: Optional[str] = None,
+    humanmac_skip_metrics: bool = False,
+    card_candidate_batch_size: int = 1,
 ) -> Optional[Dict[str, float]]:
     set_global_seed(ds.seed)
     card_graph_meta = resolve_card_hand_graph_metadata(
@@ -202,11 +205,16 @@ def run_experiment(
         config["card_eval_collect_all"] = True
     if card_eval_oracle_mpjpe:
         config["card_eval_oracle_mpjpe"] = True
+    if int(card_candidate_batch_size) > 1:
+        config["card_candidate_batch_size"] = int(card_candidate_batch_size)
     if compute_humanmac_metrics:
         config["compute_humanmac_metrics"] = True
         if resolved_num_candidates is not None:
             config["humanmac_num_candidates"] = resolved_num_candidates
         config["humanmac_multimodal_threshold"] = float(humanmac_multimodal_threshold)
+        config["humanmac_skip_metrics"] = bool(humanmac_skip_metrics)
+        if humanmac_prediction_cache_path:
+            config["humanmac_prediction_cache_path"] = str(humanmac_prediction_cache_path)
 
     if train_cfg.save_coarse_model:
         examples_models_dir = os.path.join(os.path.dirname(__file__), "examples", "models")

@@ -579,6 +579,7 @@ def main() -> None:
     threshold = float(ecfg.get("multimodal_threshold", 0.5))
 
     rcfg = _as_dict(cfg.get("runtime"))
+    checkpoint_only = bool(rcfg.get("checkpoint_only", False))
     output_dir = Path(str(rcfg.get("output_dir", _THIS_DIR / "out"))).resolve()
     metrics_csv = Path(str(rcfg.get("metrics_csv", output_dir / "eval_stats.csv"))).resolve()
 
@@ -622,6 +623,7 @@ def main() -> None:
         node_count=int(metadata.get("node_count", 21)),
         edge_index=tuple(metadata.get("edge_index", ())),
         adjacency=tuple(metadata.get("adjacency", ())),
+        eval_subset_indices_path=str(cfg.get("eval_subset_indices_path", "") or ""),
     )
 
     train_dataset, val_dataset, test_dataset = data_mod.build_datasets(ds_cfg)
@@ -666,6 +668,8 @@ def main() -> None:
             pose_prior.load_state_dict(torch.load(prior_ckpt_path, map_location=device))
             print(f"[GSPS] using existing prior checkpoint: {prior_ckpt_path}")
         else:
+            if checkpoint_only:
+                raise RuntimeError(f"GSPS checkpoint-only evaluation is missing prior checkpoint: {prior_ckpt_path}")
             print(
                 f"[GSPS] prior training dataset={dataset} action_filter='{action_filter_eff}' "
                 f"epochs={prior_epochs} lr={prior_lr} wd={prior_weight_decay}"
@@ -696,6 +700,8 @@ def main() -> None:
         model.load_state_dict(torch.load(gen_ckpt_path, map_location=device))
         print(f"[GSPS] using existing generator checkpoint: {gen_ckpt_path}")
     else:
+        if checkpoint_only:
+            raise RuntimeError(f"GSPS checkpoint-only evaluation is missing generator checkpoint: {gen_ckpt_path}")
         print(
             f"[GSPS] training dataset={dataset} action_filter='{action_filter_eff}' "
             f"epochs={epochs} batch_size={batch_size} n_pre={n_pre} nk={nk} objective={objective}"
@@ -877,14 +883,12 @@ def main() -> None:
             if (len(batch) > 3 and isinstance(batch[3], dict)
                     and torch.is_tensor(batch[3].get("sequence_id"))):
                 humanmac_sequence_batches.append(batch[3]["sequence_id"].detach().cpu().long().view(-1))
-            pred_first_all = pred_full[0]
-            gt_first = gt_full[0]
-            obs_first = conditioning_context_full[0]
-            best_idx = torch.norm(pred_first_all - gt_first.unsqueeze(0), dim=-1).mean(dim=(1, 2)).argmin()
-            saved_obs.append(obs_first.detach().cpu())
-            saved_tgt.append(gt_first.detach().cpu())
-            saved_pred.append(pred_first_all[best_idx].detach().cpu())
-            saved_pred_all.append(pred_first_all.detach().cpu())
+            best_idx = torch.norm(pred_full - gt_full[:, None], dim=-1).mean(dim=(2, 3)).argmin(dim=1)
+            batch_index = torch.arange(gt_full.shape[0], device=pred_full.device)
+            saved_obs.extend(conditioning_context_full.detach().cpu().unbind(0))
+            saved_tgt.extend(gt_full.detach().cpu().unbind(0))
+            saved_pred.extend(pred_full[batch_index, best_idx].detach().cpu().unbind(0))
+            saved_pred_all.extend(pred_full.detach().cpu().unbind(0))
 
     if total_samples == 0:
         raise RuntimeError("GSPS eval produced zero test samples.")

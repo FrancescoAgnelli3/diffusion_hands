@@ -1,0 +1,12 @@
+# Run only the E1 forecasting protocol with CIT ablations as model aliases.
+base_config: cit_grip_phase_ablations.yaml
+gpu_index: 1
+num_candidates: 20
+data_seed: 0
+evaluation_split: test
+max_samples_per_dataset_action: 2000
+experiments:
+  E1:
+    input_n: 30
+    output_n: 10
+    objective: CIT grip-phase ablation suite

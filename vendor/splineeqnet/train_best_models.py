@@ -164,6 +164,7 @@ def _build_dataset_cfg(
         use_official_splits=bool(
             _coerce_required(best_cfg.get("use_official_splits"), bool, default=False)
         ),
+        eval_subset_indices_path=str(best_cfg.get("eval_subset_indices_path", "") or ""),
     )
 
 
@@ -518,6 +519,10 @@ def main():
     ap.add_argument("--card-use-mamp-condition-coarse", action="store_true", help="Enable coarse-prediction MAMP conditioning in two-stage diffusion.")
     ap.add_argument("--card-mamp-only-conditioning", action="store_true", help="Use only MAMP conditioning tokens (disable history/coarse conditioning).")
     ap.add_argument("--num-candidates", type=int, default=10, help="Best-of-k and HumanMAC candidate count for evaluation metrics.")
+    ap.add_argument(
+        "--candidate-batch-size", type=int, default=1,
+        help="Number of seeded CIT candidates to integrate concurrently during evaluation.",
+    )
     ap.add_argument("--humanmac-multimodal-threshold", type=float, default=0.5, help="HumanMAC multimodal grouping threshold.")
     ap.add_argument(
         "--eval-split",
@@ -653,6 +658,7 @@ def main():
                 best_model_path_override=(args.checkpoint_path.strip() or None),
                 final_model_path_override=(args.final_checkpoint_path.strip() or None),
                 num_candidates=max(1, int(args.num_candidates)),
+                card_candidate_batch_size=max(1, int(args.candidate_batch_size)),
                 card_eval_oracle_mpjpe=(model_name.strip().lower() == "card"),
                 compute_humanmac_metrics=True,
                 humanmac_multimodal_threshold=float(args.humanmac_multimodal_threshold),

@@ -34,6 +34,9 @@ class Config:
         self.t_pred = cfg['t_pred']
         self.use_vel = cfg.get('use_vel', False)
         self.seed = cfg.get('seed', 0)
+        # Keep source-file selection/split membership independent from the
+        # training RNG, as in the forecasting-suite protocol.
+        self.data_seed = cfg.get('data_seed', self.seed)
         self.data_dir = cfg.get('data_dir', '')
         self.action_filter = cfg.get('action_filter', '')
         self.stride = cfg.get('stride', self.t_his)
@@ -41,6 +44,7 @@ class Config:
         self.window_norm = cfg.get('window_norm', self.t_his)
         self.splineeqnet_root = cfg.get('splineeqnet_root', '')
         self.eval_samples_path = cfg.get('eval_samples_path', '')
+        self.prediction_cache_path = cfg.get('prediction_cache_path', '')
         self.final_checkpoint_path = cfg.get('final_checkpoint_path', '')
 
         # vae

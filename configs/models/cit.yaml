@@ -12,5 +12,8 @@ defaults:
   cit_coarse_k_low: 80
   cit_transport_epochs: 200
   cit_sampling_steps: 25
+  # Batch a few seeded candidates through CIT's deterministic solver. Lower
+  # this only if the active GPU cannot accommodate the expanded evaluation batch.
+  cit_candidate_batch_size: 10
   cit_denoiser_heads: 4
   use_lr_scheduler: false

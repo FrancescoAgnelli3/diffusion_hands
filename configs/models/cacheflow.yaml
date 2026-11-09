@@ -1,0 +1,16 @@
+model: cacheflow
+enabled: true
+save_eval_samples: true
+train:
+  epochs: 80
+  batch_size: 64
+  lr: 0.0003
+  weight_decay: 0.00001
+  patience: 12
+  min_delta: 0.0001
+defaults:
+  hidden_dim: 256
+  flow_layers: 4
+  num_workers: 0
+  eval_batch_size: 128
+notes: CacheFlow-style cached conditional normalizing-flow adapter under the shared suite protocol

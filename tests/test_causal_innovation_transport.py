@@ -95,6 +95,19 @@ class CausalInnovationTests(unittest.TestCase):
         u = torch.randn(2, 5, 4, 3)
         self.assertTrue(torch.allclose(transport.encode(transport.decode(u)), u, atol=1e-6))
 
+    def test_batched_candidates_preserve_serial_seeded_samples(self):
+        model = self.model().eval()
+        transport = model.diffusion
+        transport.calibrated.fill_(True)
+        history = torch.randn(3, 4, 5, 3)
+        coarse = torch.randn(3, 5, 5, 3)
+        seeds = [11, 12, 13]
+
+        serial = torch.stack([transport.sample(history, coarse, seed) for seed in seeds])
+        batched = transport.sample_candidates(history, coarse, seeds)
+
+        self.assertTrue(torch.equal(batched, serial))
+
     def test_loss_gradients_checkpoint_seed_and_sampling_budget(self):
         h, y = torch.randn(2,4,5,3), torch.randn(2,5,5,3)
         for mode in ("linear",):
@@ -139,16 +152,6 @@ class CausalInnovationTests(unittest.TestCase):
             optimizer.step()
             losses.append(float(loss.detach()))
         self.assertLess(losses[-1], 0.25*losses[0])
-
-    def test_benchmark_protocol_preserves_requested_action_and_budgets(self):
-        plan = resolve_plan(ROOT/"configs/ablations/cit_grip_phase_next_research.yaml")
-        self.assertEqual(plan["action_filter"], "pick_up_screwd")
-        self.assertEqual(plan["seeds"], [0, 1, 2])
-        self.assertEqual(set(plan["models"]), {
-            "cit_grip_phase_soft", "cit_grip_phase_coupled",
-            "cit_grip_phase_coupled_soft",
-        })
-
 
 if __name__ == "__main__":
     unittest.main()

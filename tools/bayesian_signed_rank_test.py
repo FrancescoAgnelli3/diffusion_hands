@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
 import math
 import pickle
 import sys
@@ -182,7 +183,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rope", type=float, default=0.1)
     parser.add_argument("--rope-mode", default="effsize")
     parser.add_argument("--nsamples", type=int, default=5000)
+    parser.add_argument(
+        "--descriptive-bootstrap-replicates",
+        type=int,
+        default=20000,
+        help="Bootstrap replicates for the 95%% CI of each descriptive median.",
+    )
     parser.add_argument("--force-recompute", action="store_true")
+    parser.add_argument(
+        "--metrics-source-dir",
+        type=Path,
+        default=None,
+        help="Optional directory containing an existing window-level all_sample_metrics.csv.",
+    )
+    parser.add_argument(
+        "--sequence-ids-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional tensor with one source-sequence ID per test window. When supplied, "
+            "every metric is averaged within sequence before Bayesian testing."
+        ),
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -818,6 +840,7 @@ def save_metric_artifacts(
     rope: float,
     rope_mode: str,
     nsamples: int,
+    descriptive_bootstrap_replicates: int,
 ) -> None:
     log(f"Saving Bayesian signed-rank artifacts under {output_dir}")
     with prepend_sys_path(AUTORANK_ROOT):
@@ -847,6 +870,42 @@ def save_metric_artifacts(
             for model_name, table in all_tables.items():
                 combined[f"{model_name}__{metric}"] = table[metric]
         combined.to_csv(output_dir / "all_sample_metrics.csv", index=False)
+        descriptive_rows: List[Dict[str, object]] = []
+        descriptive_rng = np.random.default_rng(2026)
+        for model_name, table in all_tables.items():
+            for metric in METRICS:
+                values = table[metric].dropna().to_numpy(dtype=np.float64)
+                if values.size == 0:
+                    continue
+                median = float(np.median(values))
+                # Median absolute deviation is deliberately unscaled: it is a
+                # robust descriptive spread in the original metric units.
+                mad = float(np.median(np.abs(values - median)))
+                boot_medians: List[np.ndarray] = []
+                for start in range(0, descriptive_bootstrap_replicates, 256):
+                    batch = min(256, descriptive_bootstrap_replicates - start)
+                    sample_indices = descriptive_rng.integers(0, values.size, size=(batch, values.size))
+                    boot_medians.append(np.median(values[sample_indices], axis=1))
+                boot = np.concatenate(boot_medians)
+                descriptive_rows.append(
+                    {
+                        "model": model_name,
+                        "metric": metric,
+                        "n_units": int(values.size),
+                        "mean": float(values.mean()),
+                        "std": float(values.std(ddof=1)) if values.size > 1 else 0.0,
+                        "median": median,
+                        "mad": mad,
+                        "empirical_95_interval_low": float(np.quantile(values, 0.025)),
+                        "empirical_95_interval_high": float(np.quantile(values, 0.975)),
+                        "bootstrap_95ci_median_low": float(np.quantile(boot, 0.025)),
+                        "bootstrap_95ci_median_high": float(np.quantile(boot, 0.975)),
+                        "bootstrap_replicates": int(descriptive_bootstrap_replicates),
+                    }
+                )
+        pd.DataFrame(descriptive_rows).to_csv(
+            output_dir / "sequence_descriptive_summary.csv", index=False
+        )
 
         for left_model, right_model in PAIRWISE_COMPARISONS:
             pair_dir = paired_dir / f"{left_model}_vs_{right_model}"
@@ -965,8 +1024,41 @@ def load_metrics_tables_from_csv(
     return variant_tables, comusion_table
 
 
+def load_sequence_ids(path: Path, expected_size: int) -> np.ndarray:
+    """Load and validate one source-sequence ID per window."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Sequence-ID file not found: {path}")
+    values = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(values, torch.Tensor):
+        raise TypeError(f"Expected a tensor in {path}, got {type(values).__name__}")
+    sequence_ids = values.detach().cpu().numpy().reshape(-1)
+    if sequence_ids.size != expected_size:
+        raise ValueError(
+            f"Sequence-ID file has {sequence_ids.size} values; expected {expected_size}."
+        )
+    if not np.isfinite(sequence_ids).all():
+        raise ValueError("Sequence IDs must be finite.")
+    return sequence_ids.astype(np.int64, copy=False)
+
+
+def aggregate_metric_table_by_sequence(
+    table: pd.DataFrame,
+    sequence_ids: np.ndarray,
+) -> pd.DataFrame:
+    """Average all per-window metrics within each source sequence."""
+    if len(table) != sequence_ids.size:
+        raise ValueError("Metric table and sequence IDs must have the same number of rows.")
+    grouped = table.loc[:, list(METRICS)].copy()
+    grouped.insert(0, "sequence_id", sequence_ids)
+    grouped = grouped.groupby("sequence_id", sort=True, as_index=False).mean(numeric_only=True)
+    grouped = grouped.rename(columns={"sequence_id": "sample_idx"})
+    return grouped.loc[:, ["sample_idx", *METRICS]]
+
+
 def main() -> None:
     args = parse_args()
+    if args.descriptive_bootstrap_replicates < 1:
+        raise ValueError("--descriptive-bootstrap-replicates must be positive")
     runtime_cfg = resolve_runtime_config(args)
     device = torch.device(args.device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -981,10 +1073,11 @@ def main() -> None:
             f"Use --data-dir to point at your dataset root. Resolved path: {data_dir}"
         )
     cache_dir = args.output_dir / "prediction_cache"
-    metrics_path = metrics_csv_path(args.output_dir)
+    metrics_source_dir = args.metrics_source_dir or args.output_dir
+    metrics_path = metrics_csv_path(metrics_source_dir)
     if metrics_path.exists() and not args.force_recompute:
-        log(f"Loading existing per-sample metrics from {metrics_path}")
-        variant_tables, comusion_table = load_metrics_tables_from_csv(args.output_dir)
+        log(f"Loading existing per-window metrics from {metrics_path}")
+        variant_tables, comusion_table = load_metrics_tables_from_csv(metrics_source_dir)
     else:
         checkpoint_by_model = {
             "card": args.card_checkpoint,
@@ -1041,6 +1134,34 @@ def main() -> None:
                 f"comusion={len(comusion_table)}"
             )
 
+    aggregation_metadata: Dict[str, object] = {
+        "unit_of_analysis": "window",
+        "n_windows": int(len(comusion_table)),
+    }
+    if args.sequence_ids_path is not None:
+        sequence_ids = load_sequence_ids(args.sequence_ids_path, len(comusion_table))
+        sequence_counts = np.unique(sequence_ids, return_counts=True)[1]
+        variant_tables = {
+            model_name: aggregate_metric_table_by_sequence(table, sequence_ids)
+            for model_name, table in variant_tables.items()
+        }
+        comusion_table = aggregate_metric_table_by_sequence(comusion_table, sequence_ids)
+        aggregation_metadata = {
+            "unit_of_analysis": "sequence_mean",
+            "n_windows": int(sequence_ids.size),
+            "n_sequences": int(sequence_counts.size),
+            "windows_per_sequence": {
+                "min": int(sequence_counts.min()),
+                "max": int(sequence_counts.max()),
+                "mean": float(sequence_counts.mean()),
+            },
+            "sequence_ids_path": str(args.sequence_ids_path),
+        }
+        log(
+            f"Aggregated {sequence_ids.size} windows into {sequence_counts.size} "
+            "sequence-level observations"
+        )
+
     save_metric_artifacts(
         output_dir=args.output_dir,
         variant_tables=variant_tables,
@@ -1049,7 +1170,18 @@ def main() -> None:
         rope=float(args.rope),
         rope_mode=str(args.rope_mode),
         nsamples=int(args.nsamples),
+        descriptive_bootstrap_replicates=int(args.descriptive_bootstrap_replicates),
     )
+    with open(args.output_dir / "analysis_metadata.json", "w", encoding="utf-8") as handle:
+        aggregation_metadata["descriptive_summary"] = {
+            "location": "sequence_descriptive_summary.csv",
+            "median_ci": "Percentile bootstrap 95% CI of the median",
+            "empirical_interval": "2.5th to 97.5th percentiles of sequence means",
+            "mad": "Unscaled median absolute deviation",
+            "bootstrap_replicates": int(args.descriptive_bootstrap_replicates),
+        }
+        json.dump(aggregation_metadata, handle, indent=2)
+        handle.write("\n")
     log(f"Wrote Bayesian signed-rank artifacts to {args.output_dir}")
 
 

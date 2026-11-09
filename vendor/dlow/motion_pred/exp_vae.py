@@ -145,13 +145,35 @@ def evaluate_assembly_vae(eval_sample_num: int, multimodal_threshold: float):
     if num_samples == 0:
         raise RuntimeError("Assembly evaluation produced zero samples.")
 
+    all_hm_pred = torch.cat(hm_pred_batches, dim=1)
+    all_hm_gt = torch.cat(hm_gt_batches, dim=0)
+    all_hm_context = torch.cat(hm_context_batches, dim=0)
+    all_hm_sequence_ids = torch.cat(hm_sequence_batches, dim=0) if hm_sequence_batches else None
+    prediction_cache_path = str(getattr(cfg, 'prediction_cache_path', '') or '').strip()
+    if prediction_cache_path:
+        cache_path = Path(prediction_cache_path)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                'pred_candidates': all_hm_pred.to(dtype=torch.float32),
+                'gt_future': all_hm_gt.to(dtype=torch.float32),
+                'conditioning_context': all_hm_context.to(dtype=torch.float32),
+                'sequence_ids': all_hm_sequence_ids,
+                'metadata': {
+                    'model': 'dlow_cvae',
+                    'dataset': str(getattr(cfg, 'dataset', '')),
+                    'action_filter': str(getattr(cfg, 'action_filter', '')),
+                    'num_candidates': int(eval_sample_num),
+                },
+            },
+            cache_path,
+        )
     hm = humanmac_metrics(
-        pred_candidates=torch.cat(hm_pred_batches, dim=1),
-        gt_future=torch.cat(hm_gt_batches, dim=0),
-        conditioning_context=torch.cat(hm_context_batches, dim=0),
+        pred_candidates=all_hm_pred,
+        gt_future=all_hm_gt,
+        conditioning_context=all_hm_context,
         threshold=float(multimodal_threshold),
-        sequence_ids=(torch.cat(hm_sequence_batches, dim=0)
-                      if hm_sequence_batches else None),
+        sequence_ids=all_hm_sequence_ids,
     )
     for k in ('APD', 'ADE', 'FDE', 'MMADE', 'MMFDE', 'CMD', 'FID'):
         stats_meter[k].update(float(hm[k]))
@@ -190,6 +212,9 @@ if __name__ == '__main__':
     parser.add_argument('--eval_after_train', action='store_true', default=False)
     parser.add_argument('--eval_sample_num', type=int, default=10)
     parser.add_argument('--multimodal_threshold', type=float, default=0.5)
+    parser.add_argument('--checkpoint', type=Path, default=None,
+                        help='Saved VAE checkpoint; enables inference-only evaluation with --mode eval.')
+    parser.add_argument('--eval_split', choices=('val', 'test'), default='test')
     args = parser.parse_args()
 
     """setup"""
@@ -223,13 +248,14 @@ if __name__ == '__main__':
         action_filter=cfg.action_filter,
         stride=cfg.stride,
         seed=cfg.seed,
+        data_seed=cfg.data_seed,
         time_interp=cfg.time_interp,
         window_norm=cfg.window_norm,
         splineeqnet_root=getattr(cfg, 'splineeqnet_root', ''),
     )
     if cfg.normalize_data:
         dataset.normalize_data()
-    eval_mode = 'val' if cfg.dataset == 'assembly' else 'test'
+    eval_mode = args.eval_split
     eval_dataset = dataset_cls(
         eval_mode,
         t_his,
@@ -241,6 +267,7 @@ if __name__ == '__main__':
         action_filter=cfg.action_filter,
         stride=cfg.stride,
         seed=cfg.seed,
+        data_seed=cfg.data_seed,
         time_interp=cfg.time_interp,
         window_norm=cfg.window_norm,
         splineeqnet_root=getattr(cfg, 'splineeqnet_root', ''),
@@ -252,6 +279,19 @@ if __name__ == '__main__':
     model = get_vae_model(cfg, dataset.traj_dim)
     optimizer = optim.Adam(model.parameters(), lr=cfg.vae_lr)
     scheduler = get_scheduler(optimizer, policy='lambda', nepoch_fix=cfg.num_vae_epoch_fix, nepoch=cfg.num_vae_epoch)
+
+    if args.checkpoint is not None:
+        with open(args.checkpoint, 'rb') as checkpoint_file:
+            checkpoint = pickle.load(checkpoint_file)
+        state_dict = checkpoint.get('model_dict', checkpoint)
+        model.load_state_dict(state_dict)
+        model.to(device)
+        if mode == 'eval':
+            evaluate_assembly_vae(
+                eval_sample_num=max(1, int(args.eval_sample_num)),
+                multimodal_threshold=float(args.multimodal_threshold),
+            )
+            raise SystemExit(0)
 
     if mode == 'train':
         model.to(device)

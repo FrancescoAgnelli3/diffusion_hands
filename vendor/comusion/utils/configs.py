@@ -80,6 +80,9 @@ class Config:
         self.time_interp = self.data_specs.get('time_interp', None)
         self.window_norm = self.data_specs.get('window_norm', None)
         self.splineeqnet_root = self.data_specs.get('splineeqnet_root', _DEFAULT_SPLINEEQNET_ROOT)
+        # Kept at the top level because the shared SplineEqNet adapter reads
+        # this attribute directly when wrapping the test dataset.
+        self.eval_subset_indices_path = self.data_specs.get('eval_subset_indices_path', '')
         self.eval_samples_path = cfg.get('eval_samples_path', '')
 
         # # Learning
@@ -110,6 +113,7 @@ class Config:
         self.model_id = self.logging_specs.get('model_id', 'sample')
         self.model_path = self.logging_specs.get('model_path', './results/sample/models')
         self.final_checkpoint_path = self.logging_specs.get('final_checkpoint_path', '')
+        self.reuse_checkpoint_path = self.logging_specs.get('reuse_checkpoint_path', '')
         self.per_action_metrics_path = self.logging_specs.get('per_action_metrics_path', '')
         self.result_model_name = self.logging_specs.get('result_model_name', 'comusion')
         self.remove_model_internals = cfg.get('remove_model_internals', False)

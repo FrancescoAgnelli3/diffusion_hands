@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 
+from common.dataset_graphs import resolve_local_hand_graph_metadata
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "vendor/comusion"))
 
@@ -12,6 +13,7 @@ from utils import metrics as comusion_metrics
 from vendor.skeletondiffusion.src.data.loaders.assembly import (
     AssemblyDataset as SkeletonAssemblyDataset,
 )
+from vendor.skeletondiffusion.src.data.skeleton.kinematic.assembly import AssemblyKinematic
 
 
 class CoMusionMetricCompatibilityTests(unittest.TestCase):
@@ -36,6 +38,18 @@ class CoMusionMetricCompatibilityTests(unittest.TestCase):
 
 
 class SkeletonDiffusionDatasetCompatibilityTests(unittest.TestCase):
+    def test_assembly_kinematic_edges_match_shared_landmark_order(self):
+        skeleton = AssemblyKinematic(num_joints=22, if_consider_hip=False)
+        adapter_edges = {
+            tuple(sorted((int(edge[0]), int(edge[1]))))
+            for edge in skeleton.node_limbseq.tolist()
+        }
+        shared_edges = {
+            tuple(sorted((int(edge[0]), int(edge[1]))))
+            for edge in resolve_local_hand_graph_metadata("assembly")["links"]
+        }
+        self.assertEqual(adapter_edges, shared_edges)
+
     def test_adapter_accepts_shared_dataset_aux_metadata(self):
         adapter = object.__new__(SkeletonAssemblyDataset)
         adapter.dataset = [

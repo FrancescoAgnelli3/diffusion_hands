@@ -32,6 +32,11 @@ inference/
 *.jpg
 *.jpeg
 
+# Curated, reproducible GripModel paper assets (MP4 files should use Git LFS).
+!assets/
+!assets/gripmodel_visualization/
+!assets/gripmodel_visualization/**
+
 # CSV/YAML/JSON runtime reports
 *_metrics*.csv
 *eval*.csv

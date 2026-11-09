@@ -114,6 +114,7 @@ class AssemblyDataset(Dataset):
         noise_level: float = 0.30,
         noise_std: float = 0.03,
         seed: int = 0,
+        assembly_data_seed=None,
         assembly_splineeqnet_root: str = _DEFAULT_SPLINEEQNET_ROOT,
         assembly_dataset_name: str = "assembly",
         assembly_data_dir: str = "",
@@ -162,8 +163,15 @@ class AssemblyDataset(Dataset):
         except Exception:
             wrist_indices_raw = default_wrist_indices
         wrist_indices = wrist_indices_raw if len(wrist_indices_raw) == len(default_wrist_indices) else default_wrist_indices
+        # ``seed`` controls augmentation/shuffling in the SkeletonDiffusion
+        # training process.  It must not silently also choose the source-file
+        # partition: doing so lets the autoencoder, diffusion model and eval
+        # construct different train/validation/test cohorts.  Retain the
+        # historical fallback for standalone configs that do not specify a
+        # dedicated data seed.
+        data_seed = int(seed) if assembly_data_seed is None else int(assembly_data_seed)
         key = _cache_key(
-            seed=seed,
+            seed=data_seed,
             dataset_name=dataset_name,
             data_dir=data_dir,
             action_filter=action_filter,
@@ -187,7 +195,7 @@ class AssemblyDataset(Dataset):
                 window_norm=assembly_window_norm,
                 batch_size=1,
                 eval_batch_mult=1,
-                seed=int(seed),
+                seed=data_seed,
                 wrist_indices=wrist_indices,
                 dataset=dataset_name,
                 node_count=int(metadata.get("node_count", 21)),

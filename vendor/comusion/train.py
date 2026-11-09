@@ -409,14 +409,14 @@ class Trainer(object):
                 hm_context_batches.append(conditioning_context.detach().cpu())
                 hm_action_batches.append(extra['act'].detach().cpu().long().view(-1))
                 hm_sequence_batches.append(extra['sequence_id'].detach().cpu().long().view(-1))
-                pred_first_all = pred[0].reshape(k, self.cfg.t_pred, -1, 3)
-                gt_first = gt[0].reshape(self.cfg.t_pred, -1, 3)
-                obs_first = conditioning_context[0]
-                best_idx = torch.norm(pred_first_all - gt_first.unsqueeze(0), dim=-1).mean(dim=(1, 2)).argmin()
-                saved_obs.append(obs_first.detach().cpu())
-                saved_tgt.append(gt_first.detach().cpu())
-                saved_pred.append(pred_first_all[best_idx].detach().cpu())
-                saved_pred_all.append(pred_first_all.detach().cpu())
+                pred_all_batch = pred.permute(0, 1, 2, 3).reshape(gt.shape[0], k, self.cfg.t_pred, -1, 3)
+                gt_batch = gt.reshape(gt.shape[0], self.cfg.t_pred, -1, 3)
+                best_idx = torch.norm(pred_all_batch - gt_batch[:, None], dim=-1).mean(dim=(2, 3)).argmin(dim=1)
+                batch_index = torch.arange(gt.shape[0], device=pred.device)
+                saved_obs.extend(conditioning_context.detach().cpu().unbind(0))
+                saved_tgt.extend(gt_batch.detach().cpu().unbind(0))
+                saved_pred.extend(pred_all_batch[batch_index, best_idx].detach().cpu().unbind(0))
+                saved_pred_all.extend(pred_all_batch.detach().cpu().unbind(0))
 
                 print('-' * 80)
                 print(f"Samples processed: {sum(batch.shape[0] for batch in hm_gt_batches)}")
@@ -516,6 +516,11 @@ def main():
 
     """model"""
     model = get_model(cfg).to(dtype).to(device)
+    reuse_checkpoint_path = str(getattr(cfg, 'reuse_checkpoint_path', '') or '').strip()
+    if reuse_checkpoint_path:
+        with open(reuse_checkpoint_path, 'rb') as checkpoint_file:
+            payload = pickle.load(checkpoint_file)
+        model.load_state_dict(payload.get('model_dict', payload))
     diffuser = GaussianDiffusion(
         model=model,
         cfg=cfg,
@@ -551,7 +556,7 @@ def main():
     es_bad_epochs = 0
 
     # Train from scratch for this run only (no checkpoint save/load).
-    for epoch in range(0, cfg.train_epoch):
+    for epoch in range(0, 0 if reuse_checkpoint_path else cfg.train_epoch):
         ret_log = np.array([epoch + 1])
         head = np.array(['epoch'])
         lr, epoch_loss, epoch_loss_info, dt = trainer.train()

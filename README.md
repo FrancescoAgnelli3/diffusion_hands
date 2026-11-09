@@ -102,6 +102,17 @@ bash scripts/run_forecasting_suite_gpu1.sh \
   --base-config configs/experiment.local.yaml
 ```
 
+To create a new suite while reusing compatible checkpoints from an older
+suite, pass its root explicitly. Each reused checkpoint is copied into the new
+suite; missing or incompatible checkpoints fall back to normal training.
+
+```bash
+bash scripts/run_forecasting_suite_gpu1.sh \
+  --reuse-checkpoints-from results/forecasting_suite/20261009_110954 \
+  --output-root results/forecasting_suite/recalibrated \
+  --experiments E1 E2 E3
+```
+
 The launcher creates a timestamped suite directory under
 `results/forecasting_suite/`, unless `--output-root` is provided. Each
 experiment directory contains:
@@ -136,13 +147,44 @@ bash scripts/run_forecasting_suite_gpu1.sh \
 directory only when `--output-root` is omitted. The main runner determines
 which model/seed rows are already complete from the existing metric files.
 
-The retained grip-phase CIT ablations use the fixed multi-seed research runner:
+### CIT grip-phase ablations (E1)
+
+The dedicated CIT ablation suite uses the same forecasting pipeline, but each
+comparison is a CIT alias rather than a competing model. Its three-seed core
+runs E1 (30 observed / 10 predicted frames, K=20) on Assembly `remove` and
+H2O. A separate one-seed robustness suite compares physical time with the
+coupled-soft model on Assembly `rotate`/`unscrew`, BigHands, and FPHA.
 
 ```bash
-bash scripts/run_generative_research.sh \
-  --config configs/ablations/cit_grip_phase_next_research.yaml \
-  --output results/cit_grip_phase_next_research
+bash scripts/run_cit_grip_phase_ablation_suite.sh --dry-run
+bash scripts/run_cit_grip_phase_ablation_suite.sh \
+  --output-root results/cit_grip_phase_ablations/e1
+
+bash scripts/run_cit_grip_phase_robustness_suite.sh \
+  --output-root results/cit_grip_phase_ablations_robustness/e1
 ```
+
+The full-clock, stochastic-clock, full-descriptor, residual, and projection
+conditions are represented by the single coupled-soft baseline; they are not
+retrained as duplicate aliases.
+
+### E1 `remove` threshold sensitivity
+
+To measure how the multimodal-neighbour radius affects the Assembly `remove`
+results for E1 (30 observed frames, 10 forecast frames), run the fixed-cohort
+script below. It regenerates K=20 predictions for the archived seed-0 E1
+GRIP/CIT and DLow checkpoints, verifies that the two caches contain exactly the
+same windows, and writes the threshold-sweep CSV files. The calibrated E1
+threshold (`3.262270927429199`) is included in the default grid.
+
+```bash
+bash scripts/run_threshold_sensitivity_remove_e1.sh
+```
+
+Set `ASSEMBLY_DATA_DIR` if the Assembly dataset is elsewhere. For a different
+reproduced E1 cohort, set `E1_REMOVE_SUITE_ROOT` (or the individual
+`E1_REMOVE_CIT_*` / `E1_REMOVE_DLOW_*` variables) and keep its checkpoints,
+archived CIT config, seed, K, and 30/10 window lengths aligned.
 
 Run a custom config:
 

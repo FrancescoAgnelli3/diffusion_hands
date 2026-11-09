@@ -157,7 +157,7 @@ def aggregate(output, plan):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=ROOT / "configs/ablations/cit_grip_phase_next_research.yaml")
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--models", nargs="+")
     parser.add_argument("--seeds", nargs="+", type=int)
@@ -274,7 +274,7 @@ def main():
                                    coarse_updates=audit["updates"]["coarse"], generative_updates=audit["updates"]["diffusion"])
                         row["nfe_per_candidate"] = cfg["models"][name]["defaults"]["card_ddim_steps"]
                         proposal = cfg["models"][name]["defaults"].get("proposal_options", {})
-                        if proposal.get("grip_phase_transport", False):
+                        if proposal.get("main_grip_model", False):
                             # One cheap clock-network evaluation accompanies each main flow step.
                             row["auxiliary_evals_per_candidate"] = cfg["models"][name]["defaults"]["card_ddim_steps"]
                         else:

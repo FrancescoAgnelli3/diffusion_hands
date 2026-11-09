@@ -1,0 +1,18 @@
+# Compact E5 qualitative suite: evaluates only preselected top-64 mobile windows.
+base_config: experiment.gripmodel_visual_e5.yaml
+gpu_index: 1
+num_candidates: 20
+data_seed: 0
+evaluation_split: test
+# Never train as part of this visual evaluation. Missing checkpoints fail
+# explicitly, preserving a strictly checkpoint-only comparison.
+checkpoint_only: true
+max_samples_per_dataset_action: 0
+evaluation_subset:
+  enabled: true
+  manifest_root: ./results/gripmodel_visual_e5/mobile_eval_manifests
+experiments:
+  E5:
+    input_n: 60
+    output_n: 30
+    objective: GripModel qualitative benchmark with long context

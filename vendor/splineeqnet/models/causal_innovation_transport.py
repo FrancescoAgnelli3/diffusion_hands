@@ -15,9 +15,7 @@ from torch.utils.data import DataLoader
 
 from models.card import (CardConfig, CoarseDCTForecaster,
                          MRTimeTransformerDenoiser, _assert_shape)
-from models.hand_specific_transports import (
-    GripJointNoiseCoupler, GripPhaseClock, from_canonical, grip_phase, to_canonical,
-)
+from models.hand_specific_transports import GripPhaseClock, from_canonical, grip_phase, to_canonical
 
 
 # AssemblyHands' rooted palm-to-tip tree.  The order is topological: every
@@ -31,6 +29,9 @@ ASSEMBLY_PROJECTION_EDGES = (
     (5, 17), (17, 18), (18, 19), (19, 4),
     (5, 20),
 )
+GRIP_PHASE_STRENGTH = 0.5
+GRIP_CLOCK_HIDDEN_DIM = 128
+GRIP_CLOCK_LOSS_WEIGHT = 0.1
 
 
 def _rooted_projection_edges(num_nodes, wrist_index, edges):
@@ -73,14 +74,19 @@ class CausalInnovationConfig(CardConfig):
     propagation: str = "linear"
     max_persistence: float = 0.98
     scale_floor: float = 1e-4
-    terminal_kinematic_projection: bool = False
-    grip_phase_transport: bool = False
-    grip_clock_hidden_dim: int = 128
-    grip_clock_loss_weight: float = 0.1
-    grip_phase_strength: float = 1.0
-    grip_clock_conditioning: bool = False
-    grip_joint_shared_noise: bool = False
-    grip_joint_noise_strength: float = 0.35
+    # The only hand-specific variant: coupled soft grip phase with a
+    # frame-aligned kinematic clock and terminal hand-tree projection.
+    main_grip_model: bool = False
+    phase_warp_strength: float = GRIP_PHASE_STRENGTH
+    phase_descriptor: str = "full"
+    clock_conditioning: str = "full"
+    clock_mode: str = "stochastic"
+    innovation_reference: str = "causal"
+    residual_generation: bool = True
+    kinematic_projection: bool = True
+    clock_perturbation_std: float = 0.0
+    oracle_clock: bool = False
+    oracle_canonical_path: bool = False
 
 
 class CausalInnovationTransport(nn.Module):
@@ -97,7 +103,7 @@ class CausalInnovationTransport(nn.Module):
         self.register_buffer("innovation_scale", torch.ones(cfg.pred_length, n, 1))
         self.register_buffer("calibrated", torch.tensor(False))
         self.register_buffer("calibration_windows", torch.tensor(0, dtype=torch.long))
-        if cfg.terminal_kinematic_projection:
+        if cfg.main_grip_model:
             available = {tuple(map(int, edge)) for edge in metadata.get("edges", ())}
             undirected = available | {(child, parent) for parent, child in available}
             if cfg.num_nodes != 21:
@@ -133,25 +139,13 @@ class CausalInnovationTransport(nn.Module):
         # Begin at the calibrated reference process.
         nn.init.zeros_(self.denoiser.out.weight)
         nn.init.zeros_(self.denoiser.out.bias)
-        # Construct proposal-specific heads after the common velocity field so
-        # all variants retain identical denoiser initialization for a seed.
-        if cfg.grip_phase_transport:
+        # Attach the fixed main-grip heads after common-field construction.
+        if cfg.main_grip_model:
             self.grip_clock = GripPhaseClock(
-                cfg.input_length, cfg.pred_length, n, cfg.grip_clock_hidden_dim,
+                cfg.input_length, cfg.pred_length, n, GRIP_CLOCK_HIDDEN_DIM,
             )
-            if cfg.grip_clock_conditioning:
-                # Attach conditioning after constructing the common denoiser so
-                # its shared parameters retain exactly the control initialization.
-                self.denoiser.latent_dim = cfg.pred_length
-                self.denoiser.latent_proj = nn.Sequential(
-                    nn.Linear(cfg.pred_length, cfg.denoiser_dim), nn.SiLU(),
-                    nn.Linear(cfg.denoiser_dim, cfg.denoiser_dim),
-                )
-                self.denoiser.latent_gate = nn.Parameter(torch.zeros(()))
-            if cfg.grip_joint_shared_noise:
-                self.grip_noise_coupler = GripJointNoiseCoupler(
-                    cfg.input_length, cfg.pred_length, n, cfg.grip_clock_hidden_dim,
-                )
+            if cfg.clock_conditioning == "full":
+                self.denoiser.configure_kinematic_clock_conditioning(cfg.pred_length)
     def select(self, value):
         return value.index_select(-2, self.free_indices)
 
@@ -197,10 +191,17 @@ class CausalInnovationTransport(nn.Module):
     def field(self, residual, time, history, coarse, phase_context=None):
         scale = self.radius / math.sqrt(3)
         latent_context = None
-        if self.cfg.grip_clock_conditioning:
-            if phase_context is None or phase_context.shape != (history.size(0), self.cfg.pred_length):
-                raise ValueError("Clock-conditioned grip flow requires one clock logit per future frame")
-            latent_context = phase_context
+        if self.cfg.main_grip_model and self.cfg.clock_conditioning == "full":
+            expected_features = 4
+            expected = (history.size(0), self.cfg.pred_length)
+            if phase_context is None or phase_context.shape[:2] != expected:
+                raise ValueError("Clock-conditioned grip flow requires one clock value per future frame")
+            if expected_features == 1:
+                latent_context = phase_context
+            elif phase_context.ndim == 3 and phase_context.size(-1) == expected_features:
+                latent_context = phase_context
+            else:
+                raise ValueError("Kinematic clock conditioning requires four features per future frame")
         velocity = self.denoiser(
             (residual / scale).flatten(2), 1000 * time,
             self.select(history).flatten(2), self.select(coarse).flatten(2),
@@ -214,39 +215,49 @@ class CausalInnovationTransport(nn.Module):
         clean = self.encode(residual)
         return self.decode_with_jvp((1-s)*source+s*clean, clean-source)
 
+    def reference_innovations(self, noise):
+        """Map standard noise to the configured source reference process."""
+        if self.cfg.innovation_reference == "causal":
+            return noise
+        if self.cfg.innovation_reference == "variance_scaled":
+            return noise * self.innovation_scale
+        # Draw independent physical residuals, then express them in the
+        # causal innovation coordinates used by the transport solver.
+        physical = noise * (self.radius / math.sqrt(3))
+        return self.inverse_jvp(physical, physical)
+
     def training_loss(self, history, future, coarse, return_metrics=False):
         self.require_calibrated()
         residual = self.training_residual(history, future, coarse)
         condition_coarse = coarse
         clock_loss = None
         target_phase = None
-        if self.cfg.grip_phase_transport:
+        if self.cfg.main_grip_model:
             target_phase, clock_target = grip_phase(
-                history, future, strength=self.cfg.grip_phase_strength,
+                history, future, strength=self.cfg.phase_warp_strength,
+                descriptor=self.cfg.phase_descriptor,
             )
             condition_coarse = to_canonical(coarse, target_phase, history[:, -1])
             canonical_future = to_canonical(future, target_phase, history[:, -1])
-            residual = self.select(canonical_future-condition_coarse)
+            reference = condition_coarse if self.cfg.residual_generation else torch.zeros_like(condition_coarse)
+            residual = self.select(canonical_future-reference)
         time = torch.rand(history.size(0), device=history.device, dtype=history.dtype)
-        source = torch.randn_like(residual)
-        if self.cfg.grip_phase_transport:
-            clock_source = torch.randn_like(clock_target)
-            clock_source -= clock_source.mean(1, keepdim=True)
-            if self.cfg.grip_joint_shared_noise:
-                clock_source = clock_source/clock_source.square().mean(1, keepdim=True).sqrt().clamp_min(1e-6)
-                source = self.grip_noise_coupler.couple(
-                    clock_source, source, self.select(history),
-                    self.cfg.grip_joint_noise_strength,
+        source = self.reference_innovations(torch.randn_like(residual))
+        if self.cfg.main_grip_model:
+            if self.cfg.clock_mode != "fixed":
+                clock_source = torch.randn_like(clock_target)
+                clock_source -= clock_source.mean(1, keepdim=True)
+                clock_loss = self.grip_clock.loss(
+                    self.select(history), clock_target, clock_source, time,
                 )
-            clock_loss = self.grip_clock.loss(
-                self.select(history), clock_target, clock_source, time,
-            )
         point, target_velocity = self.flow_path(
             source, residual, time, coarse=condition_coarse, history=history,
         )
+        phase_context = (self.clock_features(clock_target)
+                         if self.cfg.main_grip_model and self.cfg.clock_conditioning == "full" else None)
         predicted_velocity = self.field(
             point, time, history, condition_coarse,
-            phase_context=clock_target if self.cfg.grip_clock_conditioning else None,
+            phase_context=phase_context,
         )
         error = predicted_velocity - target_velocity
         geometric_error = error.square().mean()
@@ -255,17 +266,27 @@ class CausalInnovationTransport(nn.Module):
         loss = flow_loss
         metrics = {"flow_matching_loss": flow_loss.detach()}
         if clock_loss is not None:
-            loss = loss+self.cfg.grip_clock_loss_weight*clock_loss
+            loss = loss+GRIP_CLOCK_LOSS_WEIGHT*clock_loss
             metrics["grip_clock_loss"] = clock_loss.detach()
         return (loss, metrics) if return_metrics else loss
 
+    def clock_features(self, clock_logits):
+        """Make optional phase-kinematic clock features without future poses."""
+        increments = torch.softmax(clock_logits, dim=1)
+        phase = increments.cumsum(1)
+        delta = torch.cat((increments[:, :1], increments[:, 1:] - increments[:, :-1]), dim=1)
+        return torch.stack((clock_logits, increments, phase, delta), dim=-1)
+
     def training_residual(self, history, future, coarse):
         """Return the endpoint used by flow matching in residual coordinates."""
-        return self.select(future - coarse)
+        # Direct generation uses the canonical origin as its reference; the
+        # default retains residual generation around the coarse forecast.
+        reference = coarse if self.cfg.residual_generation else torch.zeros_like(coarse)
+        return self.select(future - reference)
 
     def observed_bone_lengths(self, history):
         """Return deterministic per-subject median lengths from observed frames."""
-        if not self.cfg.terminal_kinematic_projection:
+        if not self.cfg.main_grip_model:
             raise RuntimeError("Terminal kinematic projection is disabled")
         vectors = (history.index_select(-2, self.projection_children)
                    - history.index_select(-2, self.projection_parents))
@@ -284,7 +305,7 @@ class CausalInnovationTransport(nn.Module):
         come only from the observed history.  Reconstruction follows the rooted
         tree, so every output edge has exactly its observed median length.
         """
-        if not self.cfg.terminal_kinematic_projection:
+        if not self.cfg.main_grip_model:
             raise RuntimeError("Terminal kinematic projection is disabled")
         lengths = self.observed_bone_lengths(history)
         projected = pose.clone()
@@ -307,45 +328,115 @@ class CausalInnovationTransport(nn.Module):
         return projected
 
     @torch.no_grad()
-    def sample(self, history, coarse, seed):
+    def _sample_from_noise(self, history, coarse, innovations, clock_noise=None, oracle_future=None):
+        """Integrate pre-drawn noise, allowing seeded candidates to batch safely."""
         self.require_calibrated()
-        generator = torch.Generator(device=history.device).manual_seed(int(seed))
         condition_coarse = coarse
         sampled_phase = None
         sampled_clock = None
-        sampled_clock_source = None
-        if self.cfg.grip_phase_transport:
-            sampled_phase, sampled_clock, sampled_clock_source = self.grip_clock.sample_with_source(
-                self.select(history), generator, self.cfg.ddim_steps,
-                phase_strength=self.cfg.grip_phase_strength,
-                normalize_source=self.cfg.grip_joint_shared_noise,
-            )
+        if self.cfg.main_grip_model:
+            if clock_noise is None:
+                raise ValueError("Grip-phase CIT sampling requires clock noise")
+            if self.cfg.oracle_clock and oracle_future is not None:
+                sampled_phase, sampled_clock = grip_phase(
+                    history, oracle_future, strength=self.cfg.phase_warp_strength,
+                    descriptor=self.cfg.phase_descriptor,
+                )
+            elif self.cfg.clock_mode == "fixed":
+                sampled_clock = torch.zeros_like(clock_noise)
+            else:
+                sampled_clock = (torch.zeros_like(clock_noise)
+                                 if self.cfg.clock_mode == "deterministic" else clock_noise)
+                sampled_clock = sampled_clock - sampled_clock.mean(1, keepdim=True)
+                for step in range(self.cfg.ddim_steps):
+                    time = history.new_full((history.size(0),), step / self.cfg.ddim_steps)
+                    sampled_clock = sampled_clock + self.grip_clock.field(
+                        sampled_clock, time, self.select(history)
+                    ) / self.cfg.ddim_steps
+                    sampled_clock = sampled_clock - sampled_clock.mean(1, keepdim=True)
+            if self.cfg.clock_perturbation_std:
+                sampled_clock = sampled_clock + self.cfg.clock_perturbation_std * torch.randn_like(sampled_clock)
+                sampled_clock = sampled_clock - sampled_clock.mean(1, keepdim=True)
+            if not self.cfg.oracle_clock:
+                increments = torch.softmax(sampled_clock, dim=1)
+                uniform = torch.full_like(increments, 1.0 / increments.size(1))
+                increments = ((1 - self.cfg.phase_warp_strength) * uniform
+                              + self.cfg.phase_warp_strength * increments)
+                sampled_phase = increments.cumsum(1)
             condition_coarse = to_canonical(coarse, sampled_phase, history[:, -1])
-        shape = (history.size(0), self.cfg.pred_length, self.cfg.num_nodes-1, 3)
-        innovations = torch.randn(shape, device=history.device, dtype=history.dtype, generator=generator)
-        if self.cfg.grip_joint_shared_noise:
-            innovations = self.grip_noise_coupler.couple(
-                sampled_clock_source, innovations, self.select(history),
-                self.cfg.grip_joint_noise_strength,
-            )
+            if self.cfg.oracle_canonical_path and oracle_future is not None:
+                return oracle_future
         steps = self.cfg.ddim_steps
         for step in range(steps):
             coordinate = self.decode(innovations)
             time = history.new_full((history.size(0),), step / steps)
             velocity = self.field(
                 coordinate, time, history, condition_coarse,
-                phase_context=sampled_clock if self.cfg.grip_clock_conditioning else None,
+                phase_context=(self.clock_features(sampled_clock)
+                               if self.cfg.main_grip_model and self.cfg.clock_conditioning == "full" else None),
             )
             innovations = innovations + self.inverse_jvp(coordinate, velocity) / steps
         free_residual = self.decode(innovations)
-        result = condition_coarse.clone()
+        result = (condition_coarse.clone() if self.cfg.residual_generation
+                  else torch.zeros_like(condition_coarse))
         result[:, :, self.free_indices] += free_residual
         result[:, :, self.wrist_index] = 0
         if sampled_phase is not None:
             result = from_canonical(result, sampled_phase, history[:, -1])
-        if self.cfg.terminal_kinematic_projection:
+        if self.cfg.main_grip_model and self.cfg.kinematic_projection:
             result = self.terminal_projection(result, history)
         return result
+
+    @torch.no_grad()
+    def sample(self, history, coarse, seed, oracle_future=None):
+        """Sample one seeded candidate (the reference serial implementation)."""
+        generator = torch.Generator(device=history.device).manual_seed(int(seed))
+        clock_noise = None
+        if self.cfg.main_grip_model:
+            clock_noise = torch.randn(
+                history.size(0), self.cfg.pred_length, device=history.device,
+                dtype=history.dtype, generator=generator,
+            )
+        innovations = self.reference_innovations(torch.randn(
+            history.size(0), self.cfg.pred_length, self.cfg.num_nodes - 1, 3,
+            device=history.device, dtype=history.dtype, generator=generator,
+        ))
+        return self._sample_from_noise(history, coarse, innovations, clock_noise, oracle_future)
+
+    @torch.no_grad()
+    def sample_candidates(self, history, coarse, seeds, oracle_future=None):
+        """Batch candidates while retaining the serial seed-to-noise mapping.
+
+        Random tensors are drawn separately for every seed in exactly the same
+        order as ``sample``.  Only the deterministic solver evaluations are
+        batched, so candidate ``k`` has the same stochastic input as a serial
+        run with ``seeds[k]``.
+        """
+        seeds = [int(seed) for seed in seeds]
+        if not seeds:
+            raise ValueError("Expected at least one candidate seed")
+        clock_noise_parts = []
+        innovation_parts = []
+        for seed in seeds:
+            generator = torch.Generator(device=history.device).manual_seed(seed)
+            if self.cfg.main_grip_model:
+                clock_noise_parts.append(torch.randn(
+                    history.size(0), self.cfg.pred_length, device=history.device,
+                    dtype=history.dtype, generator=generator,
+                ))
+            innovation_parts.append(self.reference_innovations(torch.randn(
+                history.size(0), self.cfg.pred_length, self.cfg.num_nodes - 1, 3,
+                device=history.device, dtype=history.dtype, generator=generator,
+            )))
+        candidate_count = len(seeds)
+        batched = self._sample_from_noise(
+            history.repeat((candidate_count, 1, 1, 1)),
+            coarse.repeat((candidate_count, 1, 1, 1)),
+            torch.cat(innovation_parts, dim=0),
+            torch.cat(clock_noise_parts, dim=0) if clock_noise_parts else None,
+            oracle_future.repeat((candidate_count, 1, 1, 1)) if oracle_future is not None else None,
+        )
+        return batched.reshape(candidate_count, history.size(0), *batched.shape[1:])
 
 
 class CausalInnovationForecaster(nn.Module):
@@ -357,22 +448,16 @@ class CausalInnovationForecaster(nn.Module):
             raise ValueError("CIT scale_floor must be finite and positive")
         if not 0 <= cfg.max_persistence < 1 or cfg.ddim_steps < 1:
             raise ValueError("CIT requires max_persistence in [0,1) and positive solver steps")
-        if cfg.terminal_kinematic_projection != cfg.grip_phase_transport:
-            raise ValueError("Terminal kinematic projection is reserved for grip-phase CIT")
-        if (not isinstance(cfg.grip_clock_hidden_dim, int) or cfg.grip_clock_hidden_dim < 8
-                or not math.isfinite(cfg.grip_clock_loss_weight) or cfg.grip_clock_loss_weight <= 0
-                or not math.isfinite(cfg.grip_phase_strength)
-                or not 0 < cfg.grip_phase_strength <= 1):
-            raise ValueError("Invalid grip-phase clock configuration")
-        if cfg.grip_clock_conditioning and not cfg.grip_phase_transport:
-            raise ValueError("Grip clock conditioning requires grip-phase transport")
-        if cfg.grip_joint_shared_noise and not cfg.grip_phase_transport:
-            raise ValueError("Shared grip noise requires grip-phase transport")
-        if cfg.grip_joint_shared_noise and not cfg.grip_clock_conditioning:
-            raise ValueError("Shared grip noise requires clock-conditioned articulation")
-        if (not math.isfinite(cfg.grip_joint_noise_strength)
-                or not 0 < cfg.grip_joint_noise_strength < 1):
-            raise ValueError("Invalid shared grip-noise strength")
+        if not 0.0 <= cfg.phase_warp_strength <= 1.0:
+            raise ValueError("phase_warp_strength must be in [0, 1]")
+        if cfg.phase_descriptor not in {"full", "fingertip_distances", "joint_displacement"}:
+            raise ValueError("Unsupported phase_descriptor")
+        if cfg.clock_conditioning not in {"none", "aligned_baseline", "full"}:
+            raise ValueError("Unsupported clock_conditioning")
+        if cfg.clock_mode not in {"fixed", "deterministic", "stochastic"}:
+            raise ValueError("Unsupported clock_mode; oracle evaluation is handled by the oracle runner")
+        if cfg.innovation_reference not in {"isotropic", "variance_scaled", "causal"}:
+            raise ValueError("Unsupported innovation_reference")
         if (cfg.use_latent_variability or cfg.diffusion_only or not cfg.freeze_coarse
                 or not cfg.cond_use_history or not cfg.cond_use_coarse):
             raise ValueError("CIT requires frozen coarse/history context and disabled CARD latent/diffusion_only modes")
@@ -414,13 +499,16 @@ class CausalInnovationForecaster(nn.Module):
                 self._check_history(history)
                 _assert_shape(future, (history.size(0), self.cfg.pred_length, self.cfg.num_nodes, 3), "future")
                 coarse = self.coarse(history)
-                if self.cfg.grip_phase_transport:
+                if self.cfg.main_grip_model:
                     phase, _ = grip_phase(
-                        history, future, strength=self.cfg.grip_phase_strength,
+                        history, future, strength=self.cfg.phase_warp_strength,
+                        descriptor=self.cfg.phase_descriptor,
                     )
                     canonical_coarse = to_canonical(coarse, phase, history[:, -1])
                     canonical_future = to_canonical(future, phase, history[:, -1])
-                    value = transport.select(canonical_future-canonical_coarse)
+                    reference = (canonical_coarse if self.cfg.residual_generation
+                                 else torch.zeros_like(canonical_coarse))
+                    value = transport.select(canonical_future-reference)
                 else:
                     value = transport.training_residual(history, future, coarse)
                 value = value.double()
@@ -477,15 +565,25 @@ class CausalInnovationForecaster(nn.Module):
 
     @torch.no_grad()
     def predict(self, history, mamp_feat=None, coarse_future=None, deterministic=True,
-                seed=0, return_score=False, action_id=None):
+                seed=0, return_score=False, action_id=None, oracle_future=None):
         self._check_history(history)
         if mamp_feat is not None:
             raise ValueError("CIT does not support MAMP conditioning")
         if self.training:
             raise RuntimeError("Call eval() before CIT prediction")
         coarse = self.coarse(history) if coarse_future is None else coarse_future
-        result = self.diffusion.sample(history, coarse, seed)
+        result = self.diffusion.sample(history, coarse, seed, oracle_future)
         return (result, history.new_zeros(history.size(0))) if return_score else result
+
+    @torch.no_grad()
+    def predict_candidates(self, history, coarse_future, seeds, return_score=False, oracle_future=None):
+        self._check_history(history)
+        if self.training:
+            raise RuntimeError("Call eval() before CIT prediction")
+        result = self.diffusion.sample_candidates(history, coarse_future, seeds, oracle_future)
+        if return_score:
+            return result, history.new_zeros((result.size(0), history.size(0)))
+        return result
 
     def forward(self, history):
         return self.coarse(history) if self.training else self.predict(history)

@@ -1,0 +1,21 @@
+model: stars
+enabled: true
+implementation_version: v2-bounded-diversity
+save_eval_samples: true
+train:
+  epochs: 80
+  batch_size: 64
+  lr: 0.0003
+  weight_decay: 0.00001
+  patience: 12
+  min_delta: 0.0001
+  diversity_weight: 0.01
+  # Lower-bound, not a reward: prevents the diversity objective from
+  # incentivising arbitrarily distant samples.
+  min_diversity: 0.05
+defaults:
+  hidden_dim: 256
+  anchors: 20
+  num_workers: 0
+  eval_batch_size: 128
+notes: STARS-style spatial-temporal-anchor adapter with bounded diversity under the shared suite protocol

@@ -1,0 +1,26 @@
+# The Hybrid-CVAE architecture is imported from the adjacent upstream checkout.
+# Its data protocol is supplied entirely by diffusion_hands.
+model: hybrid_cvae
+enabled: false
+save_eval_samples: true
+train:
+  epochs: 40
+defaults:
+  hidden: 128
+  latent: 32
+  geometry: hyperbolic
+  curvature: 1.0
+  hierarchy_weight: 0.001
+  components: 1
+  beta: 0.001
+  velocity_weight: 0.1
+  warmup: 10
+  patience: 7
+  batch_size: 64
+  lr: 0.0003
+options:
+  # Override this if the upstream checkout lives elsewhere.
+  source_root: /home/fagnelli/hybrid-CVAE-main
+notes: >-
+  Hybrid-CVAE architecture/loss with the shared diffusion_hands data, split,
+  action-filter, preprocessing, and evaluation protocol.

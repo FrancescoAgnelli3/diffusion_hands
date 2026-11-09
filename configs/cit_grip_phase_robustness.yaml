@@ -1,0 +1,23 @@
+# One-seed breadth check for the central A1 comparison. This covers the four
+# cohorts omitted from the three-seed core suite without duplicating its work.
+gpu_index: 1
+datasets: [assembly, bighands, fpha]
+action_filter: [rotate, unscrew]
+seeds: [0]
+save_model: true
+models:
+  a1_physical_time:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, phase_warp_strength: 0.0, clock_conditioning: none, clock_mode: fixed}}
+    notes: "Robustness A1: physical-time flow"
+  a1_half_phase_warp:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true}}
+    notes: "Robustness A1: coupled-soft half-strength phase warp"
+runtime:
+  output_root: ./results/cit_grip_phase_ablations_robustness
+  aggregate_csv: ./results/cit_grip_phase_ablations_robustness/metrics_long.csv
+  summary_csv: ./results/cit_grip_phase_ablations_robustness/metrics_mean_std.csv
+  per_action_csv: ./results/cit_grip_phase_ablations_robustness/metrics_by_action.csv

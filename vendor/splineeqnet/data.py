@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import re
 import sys
@@ -7,7 +8,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from tqdm import tqdm
 
 from config import DatasetCfg
@@ -729,6 +730,7 @@ def build_datasets(ds_cfg: DatasetCfg) -> Tuple[Dataset, Dataset, Dataset]:
     dset_train.source_files = tuple(train_files)
     dset_val.source_files = tuple(val_files)
     dset_test.source_files = tuple(test_files)
+    dset_test.eval_subset_indices_path = str(getattr(ds_cfg, "eval_subset_indices_path", "") or "")
     if len(dset_train) == 0 or len(dset_test) == 0 or len(dset_val) == 0:
         raise RuntimeError("No valid windows for building DataLoaders (train/val/test).")
     return dset_train, dset_val, dset_test
@@ -752,6 +754,12 @@ def make_loaders(
     eval_batch_size = max(1, int(batch_size) * eval_mult)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True, generator=train_generator)
     val_loader = DataLoader(val_dataset, batch_size=eval_batch_size, shuffle=False, drop_last=False, generator=val_generator)
+    subset_path = str(getattr(test_dataset, "eval_subset_indices_path", "") or "")
+    if subset_path:
+        indices = [int(i) for i in json.loads(Path(subset_path).read_text())]
+        if not indices or min(indices) < 0 or max(indices) >= len(test_dataset):
+            raise ValueError("invalid evaluation subset indices")
+        test_dataset = Subset(test_dataset, indices)
     test_loader = DataLoader(test_dataset, batch_size=eval_batch_size, shuffle=False, drop_last=False, generator=test_generator)
     return train_loader, val_loader, test_loader
 

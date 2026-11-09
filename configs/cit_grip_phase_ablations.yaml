@@ -1,0 +1,86 @@
+# Core E1 CIT grip-phase ablations. Each entry is an alias of the same CIT
+# model; no external competitor is enabled. Three seeds are reserved for the
+# two representative cohorts (Assembly/remove and H2O). The complementary
+# one-seed breadth check is in cit_grip_phase_robustness.yaml.
+gpu_index: 1
+datasets: [assembly, h2o]
+action_filter: [remove]
+seeds: [0, 1, 2]
+save_model: true
+models:
+  a1_physical_time:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, phase_warp_strength: 0.0, clock_conditioning: none, clock_mode: fixed}}
+    notes: "A1 physical-time flow; also the A2 independent-articulation reference"
+  a1_half_phase_warp:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, phase_warp_strength: 0.5}}
+    notes: "A1: coupled-soft half-strength phase warp (reference)"
+  a1_full_phase_warp:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, phase_warp_strength: 1.0}}
+    notes: "A1: full phase warp"
+  a2_aligned_baseline:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, clock_conditioning: aligned_baseline}}
+    notes: "A2: canonical aligned baseline without clock features"
+  a3_fixed_clock:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, clock_mode: fixed}}
+    notes: "A3: uniform fixed clock"
+  a3_deterministic_clock:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, clock_mode: deterministic}}
+    notes: "A3: deterministic predicted clock"
+  a4_ground_truth_clock:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, oracle_clock: true}}
+    notes: "A4: ground-truth phase clock; generated-clock control is a1_half_phase_warp"
+  a4_oracle_canonical_path:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, oracle_clock: true, oracle_canonical_path: true}}
+    notes: "A4: oracle canonical path reconstruction ceiling"
+  a5_isotropic_reference:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, innovation_reference: isotropic}}
+    notes: "A5: isotropic Gaussian innovation reference; causal reference control is a1_half_phase_warp"
+  a5_variance_scaled_reference:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, innovation_reference: variance_scaled}}
+    notes: "A5: variance-scaled Gaussian innovation reference"
+  a6_fingertip_descriptor:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, phase_descriptor: fingertip_distances}}
+    notes: "A6: fingertip-only distances"
+  a6_joint_displacement:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, phase_descriptor: joint_displacement}}
+    notes: "A6: joint-displacement phase"
+  a8_without_projection:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, kinematic_projection: false}}
+    notes: "A8: no terminal kinematic projection"
+  a7_direct_canonical:
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults: {proposal_options: {main_grip_model: true, residual_generation: false}}
+    notes: "A7: direct canonical generation"
+
+runtime:
+  output_root: ./results/cit_grip_phase_ablations
+  aggregate_csv: ./results/cit_grip_phase_ablations/metrics_long.csv
+  summary_csv: ./results/cit_grip_phase_ablations/metrics_mean_std.csv
+  per_action_csv: ./results/cit_grip_phase_ablations/metrics_by_action.csv

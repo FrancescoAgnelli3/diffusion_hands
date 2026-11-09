@@ -297,6 +297,9 @@ def train(
     save_coarse_model = bool(config.get("save_coarse_model", False))
     maybe_save_coarse_model = None
     params_count = 0
+    # CARD-family optimizers are normally created at the first training phase.
+    # Keep checkpoint-only, zero-epoch evaluation valid as well.
+    optimizer = None
     node_num = int(config.get("node_num", 21))
     input_n = int(config.get("input_n", 90))
     output_n = int(config.get("output_n", 42))
@@ -880,10 +883,11 @@ def train(
         if card_variant == "cit":
             options = dict(config.get("proposal_options", {}))
             allowed = {"propagation", "max_persistence", "scale_floor",
-                       "terminal_kinematic_projection", "grip_phase_transport",
-                       "grip_clock_hidden_dim", "grip_clock_loss_weight",
-                       "grip_phase_strength", "grip_clock_conditioning",
-                       "grip_joint_shared_noise", "grip_joint_noise_strength"}
+                       "main_grip_model", "phase_warp_strength",
+                       "phase_descriptor", "clock_conditioning", "clock_mode",
+                       "innovation_reference", "residual_generation",
+                       "kinematic_projection", "clock_perturbation_std",
+                       "oracle_clock", "oracle_canonical_path"}
             unknown = set(options) - allowed
             if unknown:
                 raise ValueError(f"Unknown {card_variant} options: {sorted(unknown)}")
@@ -1582,19 +1586,80 @@ def train(
                                 all_recons: List[torch.Tensor] = []
                                 all_scores: List[torch.Tensor] = []
                                 total_candidate_samples = max(selection_k, humanmac_k)
-                                for sample_idx in range(total_candidate_samples):
-                                    sample_seed = int(batch_idx * 1000003 + sample_idx)
-                                    sampled_recons, sampled_score = card_model.predict(
-                                        in_3d,
-                                        mamp_feat=card_mamp_feat,
-                                        coarse_future=coarse_future_for_condition,
-                                        deterministic=False,
-                                        seed=sample_seed,
-                                        return_score=True,
-                                        action_id=action_id_t,
-                                    )
-                                    all_recons.append(sampled_recons)
-                                    all_scores.append(sampled_score)
+                                candidate_batch_size = max(
+                                    1, int(config.get("card_candidate_batch_size", 1))
+                                )
+                                if card_variant == "cit" and candidate_batch_size > 1:
+                                    # CIT draws the random state for each candidate with its
+                                    # original seed, then batches only its deterministic ODE
+                                    # solver.  This retains the serial candidate distribution.
+                                    first_idx = 0
+                                    while first_idx < total_candidate_samples:
+                                        sample_indices = range(
+                                            first_idx,
+                                            min(first_idx + candidate_batch_size, total_candidate_samples),
+                                        )
+                                        sample_seeds = [
+                                            int(batch_idx * 1000003 + sample_idx)
+                                            for sample_idx in sample_indices
+                                        ]
+                                        try:
+                                            batched_recons, batched_scores = card_model.predict_candidates(
+                                                in_3d, coarse_future_for_condition, sample_seeds,
+                                                return_score=True,
+                                                oracle_future=(tgt_3d if (
+                                                    bool(getattr(card_model.cfg, "oracle_clock", False))
+                                                    or bool(getattr(card_model.cfg, "oracle_canonical_path", False))
+                                                ) else None),
+                                            )
+                                        except RuntimeError as exc:
+                                            # A large candidate expansion can exceed a CUDA kernel's
+                                            # launch geometry before it reaches a normal OOM check.
+                                            # Retry this exact seed range at a smaller size; no random
+                                            # state is shared between candidates, so results are unchanged.
+                                            if (
+                                                candidate_batch_size <= 1
+                                                or "invalid configuration argument" not in str(exc).lower()
+                                            ):
+                                                raise
+                                            candidate_batch_size = max(1, candidate_batch_size // 2)
+                                            if torch.cuda.is_available():
+                                                torch.cuda.empty_cache()
+                                            print(
+                                                "[CIT eval] CUDA launch rejected candidate batch; "
+                                                f"retrying with candidate_batch_size={candidate_batch_size}",
+                                                flush=True,
+                                            )
+                                            continue
+                                        all_recons.extend(batched_recons.unbind(0))
+                                        all_scores.extend(batched_scores.unbind(0))
+                                        first_idx += len(sample_seeds)
+                                else:
+                                    for sample_idx in range(total_candidate_samples):
+                                        sample_seed = int(batch_idx * 1000003 + sample_idx)
+                                        # ``oracle_future`` belongs only to the CIT transport
+                                        # forecaster.  CARD and FiHaRD share this evaluation path
+                                        # but deliberately do not expose that argument.
+                                        predict_kwargs = {}
+                                        if card_variant == "cit":
+                                            predict_kwargs["oracle_future"] = (
+                                                tgt_3d if (
+                                                    bool(getattr(card_model.cfg, "oracle_clock", False))
+                                                    or bool(getattr(card_model.cfg, "oracle_canonical_path", False))
+                                                ) else None
+                                            )
+                                        sampled_recons, sampled_score = card_model.predict(
+                                            in_3d,
+                                            mamp_feat=card_mamp_feat,
+                                            coarse_future=coarse_future_for_condition,
+                                            deterministic=False,
+                                            seed=sample_seed,
+                                            return_score=True,
+                                            action_id=action_id_t,
+                                            **predict_kwargs,
+                                        )
+                                        all_recons.append(sampled_recons)
+                                        all_scores.append(sampled_score)
                                     if (
                                         sample_idx < selection_k
                                         and collect_card_tries
@@ -1639,7 +1704,9 @@ def train(
                                             device=str(device),
                                         )
                                 if collect_for_saving and selection_k > 1:
-                                    collected_allk_preds.append(stacked_recons[:, 0].detach().cpu())
+                                    collected_allk_preds.extend(
+                                        stacked_recons.permute(1, 0, 2, 3, 4).detach().cpu().unbind(0)
+                                    )
                     if compute_humanmac_metrics:
                         if humanmac_candidates_batch is None:
                             humanmac_candidates_batch = recons.unsqueeze(0)
@@ -1666,9 +1733,9 @@ def train(
                     total_samples += inp.size(0)
 
                     if collect_for_saving:
-                        collected_obs.append(in_3d[0].detach().cpu())
-                        collected_preds.append(recons[0].detach().cpu())
-                        collected_tgts.append(tgt_3d[0].detach().cpu())
+                        collected_obs.extend(in_3d.detach().cpu().unbind(0))
+                        collected_preds.extend(recons.detach().cpu().unbind(0))
+                        collected_tgts.extend(tgt_3d.detach().cpu().unbind(0))
         finally:
             if restore_train:
                 _set_mode(True)
@@ -1713,19 +1780,48 @@ def train(
             "samples": float(total_samples),
         }
         if compute_humanmac_metrics and humanmac_pred_batches and humanmac_tgt_batches and humanmac_context_batches:
-            humanmac_metrics = _compute_humanmac_metrics(
-                torch.cat(humanmac_pred_batches, dim=1),
-                torch.cat(humanmac_tgt_batches, dim=0),
-                torch.cat(humanmac_context_batches, dim=0),
-                threshold=float(config.get("humanmac_multimodal_threshold", 0.5)),
-                sequence_ids=(torch.cat(humanmac_sequence_batches, dim=0)
-                              if humanmac_sequence_batches else None),
+            all_pred = torch.cat(humanmac_pred_batches, dim=1)
+            all_tgt = torch.cat(humanmac_tgt_batches, dim=0)
+            all_context = torch.cat(humanmac_context_batches, dim=0)
+            all_sequences = (
+                torch.cat(humanmac_sequence_batches, dim=0)
+                if humanmac_sequence_batches else None
             )
-            metrics.update(humanmac_metrics)
-            if humanmac_action_batches:
-                all_pred = torch.cat(humanmac_pred_batches, dim=1)
-                all_tgt = torch.cat(humanmac_tgt_batches, dim=0)
-                all_context = torch.cat(humanmac_context_batches, dim=0)
+            cache_path = str(config.get("humanmac_prediction_cache_path", "")).strip()
+            if cache_path:
+                expected_candidates = int(config.get("humanmac_num_candidates", all_pred.shape[0]))
+                if int(all_pred.shape[0]) != expected_candidates:
+                    raise RuntimeError(
+                        "HumanMAC cache candidate-count mismatch: "
+                        f"expected {expected_candidates}, got {int(all_pred.shape[0])}."
+                    )
+                cache_dir = os.path.dirname(os.path.abspath(cache_path))
+                os.makedirs(cache_dir, exist_ok=True)
+                torch.save(
+                    {
+                        "pred_candidates": all_pred.to(dtype=torch.float32),
+                        "gt_future": all_tgt.to(dtype=torch.float32),
+                        "conditioning_context": all_context.to(dtype=torch.float32),
+                        "sequence_ids": all_sequences,
+                        "metadata": {
+                            "model": str(config.get("result_model_name", model)),
+                            "dataset": str(config.get("dataset", "")),
+                            "action_filter": str(config.get("action_filter", "")),
+                            "num_candidates": int(all_pred.shape[0]),
+                        },
+                    },
+                    cache_path,
+                )
+            if not bool(config.get("humanmac_skip_metrics", False)):
+                humanmac_metrics = _compute_humanmac_metrics(
+                    all_pred,
+                    all_tgt,
+                    all_context,
+                    threshold=float(config.get("humanmac_multimodal_threshold", 0.5)),
+                    sequence_ids=all_sequences,
+                )
+                metrics.update(humanmac_metrics)
+            if humanmac_action_batches and not bool(config.get("humanmac_skip_metrics", False)):
                 all_actions = torch.cat(humanmac_action_batches, dim=0).long()
                 id_to_action = list(getattr(getattr(eval_loader, "dataset", None), "id_to_action", []))
                 by_action: Dict[str, Dict[str, float]] = {}
@@ -1741,8 +1837,7 @@ def train(
                         all_tgt[mask],
                         all_context[mask],
                         threshold=float(config.get("humanmac_multimodal_threshold", 0.5)),
-                        sequence_ids=(torch.cat(humanmac_sequence_batches, dim=0)[mask]
-                                      if humanmac_sequence_batches else None),
+                        sequence_ids=(all_sequences[mask] if all_sequences is not None else None),
                     )
                     action_metrics["samples"] = float(mask.sum().item())
                     by_action[action_name] = action_metrics

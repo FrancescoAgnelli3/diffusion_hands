@@ -149,6 +149,7 @@ class DatasetCfg:
     max_source_files: int = 0
     balanced_action_sampling: bool = False
     use_official_splits: bool = False
+    eval_subset_indices_path: str = ""
 
 
 @dataclass

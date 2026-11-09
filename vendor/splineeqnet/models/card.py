@@ -708,6 +708,32 @@ class _TemporalCrossAttentionBlock(nn.Module):
         return x
 
 
+class _ClockCrossAttentionBlock(nn.Module):
+    """Give every joint trajectory token direct access to clock tokens."""
+
+    def __init__(self, dim: int, n_heads: int, dropout: float) -> None:
+        super().__init__()
+        self.norm_q = nn.LayerNorm(dim)
+        self.norm_clock = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim, num_heads=n_heads, dropout=dropout, batch_first=True,
+        )
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = _MLP(dim, dropout)
+
+    def forward(self, x: torch.Tensor, clock: Optional[torch.Tensor]) -> torch.Tensor:
+        if clock is None:
+            return torch.zeros_like(x)
+        B, T, N, D = x.shape
+        _assert_shape(clock, (B, T, D), "clock_tokens")
+        q = self.norm_q(x).permute(0, 2, 1, 3).reshape(B * N, T, D)
+        memory = self.norm_clock(clock).unsqueeze(1).expand(-1, N, -1, -1)
+        memory = memory.reshape(B * N, T, D)
+        y, _ = self.attn(q, memory, memory, need_weights=False)
+        y = y.reshape(B, N, T, D).permute(0, 2, 1, 3)
+        return y + self.mlp(self.norm2(x + y))
+
+
 class _FactorizedSTBlock(nn.Module):
     def __init__(self, dim: int, n_heads: int, dropout: float) -> None:
         super().__init__()
@@ -719,12 +745,15 @@ class _FactorizedSTBlock(nn.Module):
 
         self.film_cross = _FiLM(dim, dim)
         self.cross = _TemporalCrossAttentionBlock(dim, n_heads, dropout)
+        self.clock = None
 
     def forward(
         self,
         x: torch.Tensor,
         memory: torch.Tensor,
         t_emb: torch.Tensor,
+        clock_tokens: Optional[torch.Tensor] = None,
+        clock_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         x = self.film_spatial(x, t_emb)
         x = self.spatial(x)
@@ -732,6 +761,8 @@ class _FactorizedSTBlock(nn.Module):
         x = self.temporal(x)
         x = self.film_cross(x, t_emb)
         x = self.cross(x, memory)
+        if self.clock is not None and clock_tokens is not None and clock_gate is not None:
+            x = x + clock_gate * self.clock(x, clock_tokens)
         return x
 
 
@@ -798,6 +829,7 @@ class MRTimeTransformerDenoiser(nn.Module):
         # A zero-initialized residual gate makes enabling the latent path begin
         # exactly at the non-latent denoiser instead of perturbing every FiLM block.
         self.latent_gate = nn.Parameter(torch.zeros(())) if self.latent_dim > 0 else None
+        self.clock_proj = None
 
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -822,6 +854,26 @@ class MRTimeTransformerDenoiser(nn.Module):
         nn.init.normal_(self.pos_coarse_time, std=0.02)
         nn.init.normal_(self.pos_joint, std=0.02)
         nn.init.normal_(self.pos_mamp, std=0.02)
+
+    def configure_kinematic_clock_conditioning(self, latent_dim: int) -> None:
+        """Attach CIT's fixed frame-aligned, four-feature clock pathway."""
+        if int(latent_dim) != self.t_out:
+            raise ValueError("Clock conditioning requires one value per future frame")
+        if self.latent_dim not in {0, int(latent_dim)}:
+            raise RuntimeError("Denoiser already has an incompatible latent path")
+        self.latent_dim = int(latent_dim)
+        self.latent_proj = nn.Sequential(
+            nn.Linear(self.latent_dim, self.d_model), nn.SiLU(),
+            nn.Linear(self.d_model, self.d_model),
+        )
+        self.latent_gate = nn.Parameter(torch.zeros(()))
+        self.clock_proj = nn.Sequential(
+            nn.Linear(4, self.d_model), nn.SiLU(), nn.Linear(self.d_model, self.d_model),
+        )
+        for block in self.blocks:
+            block.clock = _ClockCrossAttentionBlock(
+                self.d_model, block.spatial.attn.num_heads, block.spatial.attn.dropout,
+            )
 
     def _flat_to_joint_tokens(self, x: torch.Tensor, T: int, name: str) -> torch.Tensor:
         B = x.size(0)
@@ -902,18 +954,26 @@ class MRTimeTransformerDenoiser(nn.Module):
 
         te = _timestep_embedding(timesteps, self.d_model).to(dtype=x.dtype, device=x.device)
         te = self.t_embed(te)
+        clock_tokens = None
+        clock_gate = None
         if self.latent_proj is not None:
             if latent_z is None:
                 raise ValueError("latent_z is required when latent variability is enabled.")
-            _assert_shape(latent_z, (B, self.latent_dim), "latent_z")
-            te = te + torch.tanh(self.latent_gate) * self.latent_proj(
-                latent_z.to(device=x.device, dtype=x.dtype)
-            )
+            if self.clock_proj is None:
+                _assert_shape(latent_z, (B, self.latent_dim), "latent_z")
+                te = te + torch.tanh(self.latent_gate) * self.latent_proj(
+                    latent_z.to(device=x.device, dtype=x.dtype)
+                )
+            else:
+                _assert_shape(latent_z, (B, self.t_out, 4), "clock_context")
+                clock_tokens = self.clock_proj(latent_z.to(device=x.device, dtype=x.dtype))
+                clock_tokens = clock_tokens + self.pos_q_time.squeeze(2)
+                clock_gate = torch.tanh(self.latent_gate)
         elif latent_z is not None:
             raise ValueError("latent_z was provided but this denoiser was built without latent conditioning.")
 
         for block in self.blocks:
-            x = block(x, memory, te)
+            x = block(x, memory, te, clock_tokens=clock_tokens, clock_gate=clock_gate)
 
         v_hat = self.out(self.out_norm(x))
         v_hat = v_hat.reshape(B, self.t_out, self.in_feat)

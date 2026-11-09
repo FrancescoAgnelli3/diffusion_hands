@@ -49,6 +49,7 @@ def build_assembly_train_val(cfg, t_his, t_pred, train_batch_size, seed):
         max_source_files=max(0, int(getattr(cfg, "max_source_files", 0))),
         balanced_action_sampling=bool(getattr(cfg, "balanced_action_sampling", False)),
         use_official_splits=bool(getattr(cfg, "use_official_splits", False)),
+        eval_subset_indices_path=str(getattr(cfg, "eval_subset_indices_path", "") or ""),
         include_action_labels=True,
     )
 

@@ -25,6 +25,7 @@ class DatasetAssembly(Dataset):
         action_filter="",
         stride=5,
         seed=0,
+        data_seed=None,
         time_interp=None,
         window_norm=None,
         splineeqnet_root=None,
@@ -36,6 +37,7 @@ class DatasetAssembly(Dataset):
         self.action_filter = action_filter
         self.stride = max(1, int(stride))
         self.seed = int(seed)
+        self.data_seed = self.seed if data_seed is None else int(data_seed)
         self.time_interp = time_interp
         self.window_norm = int(window_norm) if window_norm is not None else int(t_his)
         self.splineeqnet_root = str(splineeqnet_root or (_PROJECT_ROOT / "vendor" / "splineeqnet"))
@@ -81,6 +83,7 @@ class DatasetAssembly(Dataset):
             batch_size=1,
             eval_batch_mult=1,
             seed=int(self.seed),
+            data_seed=int(self.data_seed),
             wrist_indices=default_wrist_indices,
             dataset=self.dataset_name,
             node_count=int(metadata.get("node_count", 21)),

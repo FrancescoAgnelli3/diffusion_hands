@@ -1,0 +1,57 @@
+# Copy this file to experiment.gripmodel_visual_e2.local.yaml and add data_roots
+# as described in README.md.  This is a visualisation-only, single-seed suite:
+# the post-run planner selects only the most mobile matched test windows.
+seeds: [0]
+data_seed: 0
+gpu_index: 1
+num_candidates: 20
+save_model: true
+
+preprocessing:
+  input_n: 30
+  output_n: 30
+  stride: 20
+  time_interp: null
+  window_norm: null
+  eval_batch_mult: 1
+
+# Assembly is evaluated action-by-action; the remaining datasets retain their
+# official action-agnostic test cohorts.
+datasets: [assembly, bighands, h2o, fpha]
+action_filter: [remove, rotate, unscrew, pick, put, attempt]
+
+# Chosen from the E2 Assembly results: broadly strongest successful competitors
+# by mean ADE across all six actions (CoMusion, FiHaRD, GSPS, STARS).
+models:
+  fihard:
+    enabled: true
+    config_path: models/fihard.yaml
+  comusion:
+    enabled: true
+    config_path: models/comusion.yaml
+  gsps:
+    enabled: true
+    config_path: models/gsps.yaml
+  stars:
+    enabled: true
+    config_path: models/stars.yaml
+  cit_grip_phase_coupled_soft:
+    enabled: true
+    config_path: models/cit.yaml
+    base_model: cit
+    defaults:
+      proposal_options:
+        main_grip_model: true
+    notes: GripModel visual benchmark
+
+runtime:
+  output_root: ./results
+  aggregate_csv: ./results/gripmodel_visual_e2_long.csv
+  summary_csv: ./results/gripmodel_visual_e2_mean_std.csv
+  per_action_csv: ./results/gripmodel_visual_e2_by_action.csv
+
+# Created by tools/build_mobile_eval_manifests.py.  Each test run loads only
+# the matching top-64 dynamic windows, before inference reaches any backend.
+evaluation_subset:
+  enabled: true
+  manifest_root: ./results/gripmodel_visual_e2/mobile_eval_manifests

@@ -5,11 +5,63 @@ from typing import Dict, Optional, Tuple
 import torch
 
 
+def cross_sequence_neighbor_coverage(
+    conditioning_context: torch.Tensor,
+    sequence_ids: torch.Tensor,
+    *,
+    threshold: float,
+    chunk_size: int = 128,
+    device: Optional[torch.device] = None,
+) -> Dict[str, float]:
+    """Measure eligible cross-sequence neighbourhood coverage at ``threshold``.
+
+    MMADE/MMFDE are undefined for a test window without an eligible neighbour.
+    This uses the same strict-radius and same-sequence exclusion rules as
+    :func:`common.metrics.humanmac_metrics`, but is chunked to avoid materialising
+    an ``N x N`` distance matrix.
+    """
+    context = torch.as_tensor(conditioning_context, dtype=torch.float32)
+    ids = torch.as_tensor(sequence_ids, dtype=torch.long).reshape(-1)
+    if context.ndim < 2:
+        raise ValueError("conditioning_context must have a sample dimension and features")
+    if context.shape[0] != ids.numel():
+        raise ValueError("sequence_ids must contain one id per conditioning sample")
+    if context.shape[0] < 2:
+        raise ValueError("at least two conditioning samples are required for coverage")
+    if int(chunk_size) < 1:
+        raise ValueError("chunk_size must be at least 1")
+    if not torch.isfinite(torch.tensor(float(threshold))) or float(threshold) <= 0:
+        raise ValueError("threshold must be finite and positive")
+
+    work_device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    flat = context.reshape(context.shape[0], -1).to(work_device)
+    ids_device = ids.to(work_device)
+    covered = 0
+    neighbour_total = 0
+    for start in range(0, flat.shape[0], int(chunk_size)):
+        query = flat[start : start + int(chunk_size)]
+        distances = torch.cdist(query, flat)
+        query_ids = ids_device[start : start + query.shape[0]]
+        eligible = (distances < float(threshold)) & (query_ids[:, None] != ids_device[None, :])
+        counts = eligible.sum(dim=1)
+        covered += int((counts > 0).sum().item())
+        neighbour_total += int(counts.sum().item())
+
+    num_samples = int(flat.shape[0])
+    return {
+        "coverage": covered / num_samples,
+        "covered_samples": covered,
+        "uncovered_samples": num_samples - covered,
+        "num_samples": num_samples,
+        "mean_eligible_neighbours": neighbour_total / num_samples,
+    }
+
+
 def calibrate_multimodal_threshold(
     conditioning_context: torch.Tensor,
     sequence_ids: torch.Tensor,
     *,
-    k: int = 5,
+    k: int = 1,
     chunk_size: int = 128,
     device: Optional[torch.device] = None,
 ) -> Tuple[float, Dict[str, float]]:

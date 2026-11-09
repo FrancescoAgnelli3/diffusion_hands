@@ -136,6 +136,34 @@ def _build_windows_from_sequences(
     return samples
 
 
+def _build_windows_from_dataset(dataset: Dataset) -> List[WindowSample]:
+    """Preserve the shared loader's exact window order and representation.
+
+    Reconstructing windows from raw sequences is subtly unsafe: even an
+    equivalent-looking loop can diverge from the dataset index used by the
+    checkpoint evaluators.  Qualitative comparisons rely on exact matched
+    observations, so consume ``Dataset.__getitem__`` directly.
+    """
+    samples: List[WindowSample] = []
+    for index in range(len(dataset)):
+        obs, future, norm, aux = dataset[index]
+        obs_xyz = obs[..., :3] if obs.shape[-1] == 3 else obs[..., 4:7]
+        future_xyz = future[..., :3] if future.shape[-1] == 3 else future[..., 4:7]
+        if isinstance(aux, dict) and "sequence_id" in aux:
+            sequence_id = int(aux["sequence_id"])
+        elif torch.is_tensor(aux):
+            sequence_id = int(aux)
+        else:
+            sequence_id = index
+        samples.append(WindowSample(
+            obs=obs_xyz.detach().cpu().numpy().astype(np.float32, copy=True),
+            fut=future_xyz.detach().cpu().numpy().astype(np.float32, copy=True),
+            norm=float(norm),
+            sequence_id=sequence_id,
+        ))
+    return samples
+
+
 def load_split_samples(cfg: Dict[str, object]) -> Tuple[List[WindowSample], List[WindowSample], List[WindowSample]]:
     splineeqnet_root = Path(
         str(cfg.get("data", {}).get("splineeqnet_root", ROOT / "vendor" / "splineeqnet"))
@@ -196,6 +224,7 @@ def load_split_samples(cfg: Dict[str, object]) -> Tuple[List[WindowSample], List
         batch_size=1,
         eval_batch_mult=1,
         seed=int(cfg["seed"]),
+        data_seed=int(data_cfg.get("data_seed", cfg["seed"])),
         wrist_indices=default_wrist_indices,
         dataset=dataset_name,
         node_count=int(metadata.get("node_count", 21)),
@@ -204,26 +233,9 @@ def load_split_samples(cfg: Dict[str, object]) -> Tuple[List[WindowSample], List
     )
     train_ds, val_ds, test_ds = build_datasets(ds_cfg)
 
-    kwargs = dict(
-        input_n=int(data_cfg["input_n"]),
-        output_n=int(data_cfg["output_n"]),
-        stride=int(data_cfg["stride"]),
-    )
-    train = _build_windows_from_sequences(
-        getattr(train_ds, "sequences", []),
-        getattr(train_ds, "norm_factors", []),
-        **kwargs,
-    )
-    val = _build_windows_from_sequences(
-        getattr(val_ds, "sequences", []),
-        getattr(val_ds, "norm_factors", []),
-        **kwargs,
-    )
-    test = _build_windows_from_sequences(
-        getattr(test_ds, "sequences", []),
-        getattr(test_ds, "norm_factors", []),
-        **kwargs,
-    )
+    train = _build_windows_from_dataset(train_ds)
+    val = _build_windows_from_dataset(val_ds)
+    test = _build_windows_from_dataset(test_ds)
     return train, val, test
 
 
@@ -290,14 +302,14 @@ def evaluate_model(
             hm_context_batches.append(conditioning_context.detach().cpu())
             hm_sequence_batches.append(sequence_id.detach().cpu().long().view(-1))
 
-            pred_first_all = pred[:, 0].reshape(num_samples, output_n, n_nodes, 3)
-            gt_first = gt[0].reshape(output_n, n_nodes, 3)
-            obs_first = conditioning_context[0]
-            best_idx = torch.norm(pred_first_all - gt_first.unsqueeze(0), dim=-1).mean(dim=(1, 2)).argmin()
-            saved_obs.append(obs_first.detach().cpu())
-            saved_tgt.append(gt_first.detach().cpu())
-            saved_pred.append(pred_first_all[best_idx].detach().cpu())
-            saved_pred_all.append(pred_first_all.detach().cpu())
+            pred_all_batch = pred.permute(1, 0, 2, 3).reshape(bs, num_samples, output_n, n_nodes, 3)
+            gt_batch = gt.reshape(bs, output_n, n_nodes, 3)
+            best_idx = torch.norm(pred_all_batch - gt_batch[:, None], dim=-1).mean(dim=(2, 3)).argmin(dim=1)
+            batch_index = torch.arange(bs, device=pred.device)
+            saved_obs.extend(conditioning_context.detach().cpu().unbind(0))
+            saved_tgt.extend(gt_batch.detach().cpu().unbind(0))
+            saved_pred.extend(pred_all_batch[batch_index, best_idx].detach().cpu().unbind(0))
+            saved_pred_all.extend(pred_all_batch.detach().cpu().unbind(0))
 
     if not hm_pred_batches:
         raise RuntimeError("No valid test windows were produced for BeLFusion evaluation.")
@@ -353,6 +365,13 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
         latent_dim=int(model_cfg["latent_dim"]),
     ).to(device)
 
+    checkpoint_path = Path(str(runtime_cfg.get("checkpoint_path", Path(runtime_cfg["output_dir"]) / "checkpoints" / "final.pt")))
+    reuse_checkpoint = Path(str(runtime_cfg["reuse_checkpoint_path"])) if runtime_cfg.get("reuse_checkpoint_path") else None
+    loaded_checkpoint = reuse_checkpoint is not None and reuse_checkpoint.is_file()
+    if loaded_checkpoint:
+        payload = torch.load(reuse_checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(payload.get("model", payload))
+
     batch_size = int(train_cfg["batch_size"])
     num_workers = int(train_cfg.get("num_workers", 0))
     train_loader = make_loader(train_samples, batch_size=batch_size, shuffle=True, num_workers=num_workers)
@@ -372,7 +391,7 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
     es_bad_epochs = 0
     es_best_state = None
 
-    for _epoch in range(1, epochs + 1):
+    for _epoch in range(1, 1 if loaded_checkpoint else epochs + 1):
         model.train()
         train_loss_sum = 0.0
         train_steps = 0
@@ -447,6 +466,9 @@ def train(cfg: Dict[str, object]) -> Dict[str, float]:
 
     if es_best_state is not None:
         model.load_state_dict(es_best_state)
+
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": model.state_dict()}, checkpoint_path)
 
     out_dir = Path(str(runtime_cfg["output_dir"]))
     out_dir.mkdir(parents=True, exist_ok=True)

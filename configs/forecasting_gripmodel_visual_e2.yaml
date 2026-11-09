@@ -1,0 +1,21 @@
+# A compact E2 run for qualitative assets. The accompanying mobile-window
+# manifest keeps the top 64 test windows per action/dataset for inference.
+base_config: experiment.gripmodel_visual_e2.local.yaml
+gpu_index: 1
+num_candidates: 20
+data_seed: 0
+evaluation_split: test
+# Never train as part of this visual evaluation. Missing checkpoints fail
+# explicitly, preserving a strictly checkpoint-only comparison.
+checkpoint_only: true
+# The complete test split is constructed first; each runner then loads only
+# the cohort-specific top-64 mobile-window manifest.
+max_samples_per_dataset_action: 0
+evaluation_subset:
+  enabled: true
+  manifest_root: ./results/gripmodel_visual_e2/mobile_eval_manifests
+experiments:
+  E2:
+    input_n: 30
+    output_n: 30
+    objective: GripModel qualitative visual benchmark

@@ -331,10 +331,23 @@ def humanmac_metrics(
             raise ValueError("sequence_ids must contain one id per evaluated sample")
 
     pairwise = torch.cdist(context_flat, context_flat)
-    neighbor_mask = pairwise < float(threshold)
-    neighbor_mask.fill_diagonal_(False)
+    eligible_pairs = torch.ones_like(pairwise, dtype=torch.bool)
+    eligible_pairs.fill_diagonal_(False)
     if sequence_ids is not None:
-        neighbor_mask &= sequence_ids[:, None] != sequence_ids[None, :]
+        eligible_pairs &= sequence_ids[:, None] != sequence_ids[None, :]
+    effective_threshold = float(threshold)
+    neighbor_mask = (pairwise < effective_threshold) & eligible_pairs
+    # Calibration happens before a model backend selects/filters its actual
+    # evaluation windows.  A non-empty neighbour set in the full test split can
+    # therefore become empty here.  Preserve the calibrated radius whenever it
+    # works; only in the otherwise-NaN case enlarge it by 10% until this exact
+    # evaluation set contains a valid cross-sequence pair.
+    if effective_threshold > 0:
+        retry_steps = 0
+        while not bool(neighbor_mask.any()) and retry_steps < 100:
+            effective_threshold *= 1.1
+            retry_steps += 1
+            neighbor_mask = (pairwise < effective_threshold) & eligible_pairs
     apd_total = 0.0
     ade_total = 0.0
     fde_total = 0.0
